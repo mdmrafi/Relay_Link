@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Settings tile shows toggle state, switches on tap
-- [ ] Tap when off → display safety warning modal, "Confirm" required to enable
-- [ ] Tap when on → confirmation prompt "Turn off?", then disable
-- [ ] Safety warning text matches spec §10 word-for-word
-- [ ] Toggle state persists across app restarts
-- [ ] README discloses the toggle and links to the safety warning text
+- [x] Settings tile shows toggle state, switches on tap
+- [x] Tap when off → display safety warning modal, "Confirm" required to enable
+- [x] Tap when on → confirmation prompt "Turn off?", then disable
+- [x] Safety warning text matches spec §10 word-for-word
+- [x] Toggle state persists across app restarts
+- [x] README discloses the toggle and links to the safety warning text
