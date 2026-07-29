@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Filter sized for n=2000, p=0.01 (document the size math inline: m = -n*ln(p)/(ln(2)^2), k = (m/n)*ln(2))
-- [ ] Two independent hash functions (use a fast non-cryptographic hash like xxhash, since IDs are already random UUIDs — cryptographic strength not needed here)
-- [ ] Unit tests: insert 2000 random IDs, query 1000 unseen → false positive rate < 2% in repeated trials
-- [ ] `encode()` produces compact byte representation; `decode()` is the inverse
-- [ ] Two filters can be OR'd together (union) to compute symmetric difference queries efficiently
+- [x] Filter sized for n=2000, p=0.01 (document the size math inline: m = -n*ln(p)/(ln(2)^2), k = (m/n)*ln(2))
+- [x] Two independent hash functions (use a fast non-cryptographic hash like xxhash, since IDs are already random UUIDs — cryptographic strength not needed here)
+- [x] Unit tests: insert 2000 random IDs, query 1000 unseen → false positive rate < 2% in repeated trials
+- [x] `encode()` produces compact byte representation; `decode()` is the inverse
+- [x] Two filters can be OR'd together (union) to compute symmetric difference queries efficiently
