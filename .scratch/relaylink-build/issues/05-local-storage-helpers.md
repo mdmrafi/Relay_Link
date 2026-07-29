@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Database initialized on first launch; migrations defined for schema bumps
-- [ ] `LocalDb.insertMessage(msg)`, `getMessage(id)`, `listMessages(limit, offset)`, `pruneOlderThan(timestamp)` work
-- [ ] `LocalDb.markSeen(id)`, `isSeen(id)`, `listSeenIds()` work (for the seen-cache in mesh layer)
-- [ ] `LocalDb.insertVaultRecord(rec)`, `listVaultRecords()`, `deleteVaultRecord(id)` work
-- [ ] `SecretsStore` exposes typed `getIdentity()`, `setIdentity()`, plus arbitrary `getSecret(key)`/`setSecret(key, value)`
-- [ ] Tests use an in-memory or temp-dir database (no test pollution)
+- [x] Database initialized on first launch; migrations defined for schema bumps
+- [x] `LocalDb.insertMessage(msg)`, `getMessage(id)`, `listMessages(limit, offset)`, `pruneOlderThan(timestamp)` work
+- [x] `LocalDb.markSeen(id)`, `isSeen(id)`, `listSeenIds()` work (for the seen-cache in mesh layer)
+- [x] `LocalDb.insertVaultRecord(rec)`, `listVaultRecords()`, `deleteVaultRecord(id)` work
+- [x] `SecretsStore` exposes typed `getIdentity()`, `setIdentity()`, plus arbitrary `getSecret(key)`/`setSecret(key, value)`
+- [x] Tests use an in-memory or temp-dir database (no test pollution)
