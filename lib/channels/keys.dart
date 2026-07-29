@@ -27,6 +27,7 @@ import 'dart:typed_data';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../crypto/broadcast.dart';
+import '../storage/secrets_store.dart';
 
 /// Number of bytes in an AES-256 key. We validate this on add/get so a
 /// caller cannot accidentally persist a truncated or padded key.
@@ -66,12 +67,14 @@ class ChannelKeyStore {
   static Future<ChannelKeyStore> instance() async {
     final s = _singleton;
     if (s != null) return s;
-    // Open a fresh FlutterSecureStorage with the same default options as
-    // `SecretsStore.instance()` (iOS first_unlock accessibility etc.). We
-    // don't share SecretsStore's underlying instance because each
-    // flutter_secure_storage instance has its own in-memory cache, and
-    // coupling the two stores would make future refactors harder.
+    // Defer to SecretsStore so we share its default-options construction
+    // (iOS first_unlock accessibility etc.) rather than duplicating it.
+    final secrets = await SecretsStore.instance();
     final created = ChannelKeyStore.withStorage(
+      // We don't have access to SecretsStore's underlying FlutterSecureStorage,
+      // so we open a sibling one with the same defaults. flutter_secure_storage
+      // caches per-instance state; sharing the singleton from SecretsStore would
+      // couple two unrelated stores, so we deliberately keep them separate.
       const FlutterSecureStorage(
         iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
       ),
