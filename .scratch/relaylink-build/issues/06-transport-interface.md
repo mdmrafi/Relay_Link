@@ -4,11 +4,11 @@
 
 **Blocked by:** #01, #04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Transport` abstract class with the four members above
-- [ ] `TransportManager.register(Transport)`, `unregister(Transport)`, `fanOutSend(Message)` working
-- [ ] `fanOutSend` only sends on transports where `isAvailable()` returns true
-- [ ] `incoming` stream is broadcast (multiple listeners can subscribe)
-- [ ] A trivial `LoopbackTransport` (sends go directly to `incoming` of the same manager) for testing without radios
-- [ ] Tests: `LoopbackTransport` round-trips a message, `isAvailable` toggles correctly
+- [x] `Transport` abstract class with the four members above
+- [x] `TransportManager.register(Transport)`, `unregister(Transport)`, `fanOutSend(Message)` working
+- [x] `fanOutSend` only sends on transports where `isAvailable()` returns true
+- [x] `incoming` stream is broadcast (multiple listeners can subscribe)
+- [x] A trivial `LoopbackTransport` (sends go directly to `incoming` of the same manager) for testing without radios
+- [x] Tests: `LoopbackTransport` round-trips a message, `isAvailable` toggles correctly
