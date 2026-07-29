@@ -435,8 +435,12 @@ Uint8List? _reassembleSegments(List<String> segments) {
   int? total;
   String? msgid;
   for (final seg in segments) {
-    final parsed = SmsFraming.parseSegment(seg);
-    if (parsed == null) return null;
+    final SmsFragment parsed;
+    try {
+      parsed = SmsFraming.parseSegment(seg);
+    } catch (_) {
+      return null;
+    }
     // `parsed.body` is the full segment text including the `RL:...` header.
     // The base64 chunk lives after the third colon.
     final headerParts = parsed.body.split(':');
