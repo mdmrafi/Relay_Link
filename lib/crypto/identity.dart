@@ -153,6 +153,32 @@ class DeviceIdentity {
     );
   }
 
+  /// Derive [length] bytes of device-bound key material from the Ed25519
+  /// private seed using HKDF-SHA256 with the caller-provided domain [info].
+  ///
+  /// The raw private seed never leaves this object — callers receive only
+  /// domain-separated derived bytes. Intended for encrypt-at-rest wrapping
+  /// keys (for example the Evidence Vault's `vault-wrap-v1` key), not for
+  /// signing or key exchange.
+  Future<Uint8List> deriveKeyMaterial({
+    required String info,
+    int length = 32,
+  }) async {
+    if (info.isEmpty) {
+      throw ArgumentError.value(info, 'info', 'HKDF domain must not be empty');
+    }
+    if (length <= 0) {
+      throw ArgumentError.value(length, 'length', 'must be positive');
+    }
+    final seed = await _signingKey.extractPrivateKeyBytes();
+    final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: length);
+    final derived = await hkdf.deriveKey(
+      secretKey: SecretKey(seed),
+      info: utf8.encode(info),
+    );
+    return Uint8List.fromList(await derived.extractBytes());
+  }
+
   /// Sign [message] with the Ed25519 signing key. Returns 64 raw bytes.
   Future<Uint8List> sign(List<int> message) async {
     final ed = Ed25519();

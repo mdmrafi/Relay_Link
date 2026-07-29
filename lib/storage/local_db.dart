@@ -37,7 +37,13 @@ import 'vault_record.dart';
 class LocalDb {
   /// Bumped whenever a migration is added. Migrations are additive; never
   /// rewrite an existing onCreate block.
-  static const int schemaVersion = 1;
+  ///
+  /// Version history:
+  ///   * v1 — initial schema (messages, seen_cache, vault_records with a
+  ///     single ciphertext column, no encryption envelope).
+  ///   * v2 — Ticket #31: vault_records gains `per_record_key_wrapped`,
+  ///     `nonce`, and `aad` columns for the AES-256-GCM envelope.
+  static const int schemaVersion = 2;
 
   /// Default on-device database name. Lives under the platform's
   /// `getDatabasesPath()` (sqflite handles iOS/Android/desktop paths).
@@ -49,6 +55,11 @@ class LocalDb {
   /// Uses `IF NOT EXISTS` so the statements are idempotent — that lets
   /// tests call [migrate] twice (once from `onCreate`, once from
   /// [LocalDb.withDatabase]) without exploding.
+/// Public re-export of [_createV1] for migration tests. Tests use this
+  /// to spin up a strict v1 database so they can verify the v1 → v2
+  /// migration logic.
+  static String get createV1Sql => _createV1;
+
   static const String _createV1 = '''
     CREATE TABLE IF NOT EXISTS messages (
       id          TEXT PRIMARY KEY,
@@ -73,6 +84,61 @@ class LocalDb {
     CREATE INDEX IF NOT EXISTS vault_records_created_at_idx
       ON vault_records(created_at);
   ''';
+
+  /// v2 schema for new installs. Matches v1 but with the new columns
+  /// required by the Ticket #31 AES-256-GCM envelope. Fresh installs
+  /// land here directly so `migrate()` can stay idempotent.
+  static const String _createV2 = '''
+    CREATE TABLE IF NOT EXISTS messages (
+      id          TEXT PRIMARY KEY,
+      json        TEXT NOT NULL,
+      received_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS messages_received_at_idx
+      ON messages(received_at);
+
+    CREATE TABLE IF NOT EXISTS seen_cache (
+      id            TEXT PRIMARY KEY,
+      first_seen_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS vault_records (
+      id                     TEXT    PRIMARY KEY,
+      ciphertext             BLOB,
+      per_record_key_wrapped BLOB,
+      nonce                  BLOB,
+      aad                    BLOB,
+      created_at             INTEGER NOT NULL,
+      recipient_id           TEXT    NOT NULL DEFAULT '',
+      status                 TEXT    NOT NULL DEFAULT 'pending'
+    );
+    CREATE INDEX IF NOT EXISTS vault_records_created_at_idx
+      ON vault_records(created_at);
+  ''';
+
+  /// Apply the v1 → v2 migration idempotently: add the three new
+  /// columns to `vault_records` if they don't already exist. Uses
+  /// `PRAGMA table_info` to test for the column first so a partial
+  /// migration that already added some columns won't fail.
+  static Future<void> _applyV2(Database db) async {
+    await _addColumnIfMissing(db, 'vault_records', 'per_record_key_wrapped',
+        'BLOB');
+    await _addColumnIfMissing(db, 'vault_records', 'nonce', 'BLOB');
+    await _addColumnIfMissing(db, 'vault_records', 'aad', 'BLOB');
+  }
+
+  static Future<void> _addColumnIfMissing(
+    Database db,
+    String table,
+    String column,
+    String type,
+  ) async {
+    final rows = await db.rawQuery('PRAGMA table_info($table);');
+    final exists = rows.any((row) => row['name'] == column);
+    if (exists) return;
+    // SQLite does not allow parameterized ALTER TABLE — interpolate.
+    await db.rawQuery('ALTER TABLE $table ADD COLUMN $column $type;');
+  }
 
   final Database _db;
 
@@ -117,12 +183,12 @@ class LocalDb {
   /// a fresh database (creates tables) or on a partial one (bumps version
   /// and applies upgrade paths).
   static Future<void> migrate(Database db) async {
+    // Apply v1 (no-op if already current). Then add v2 columns to
+    // vault_records. A fresh install will go through both, ending up
+    // with the v2 schema. An existing v1 install will gain the new
+    // columns. An existing v2 install will see no-op idempotent ALTERs.
     await db.execute(_createV1);
-    // sqflite exposes schema-version via PRAGMA user_version. We don't
-    // need to maintain a separate table; the open() callback handles
-    // version bookkeeping. The explicit _createV1 above is also called
-    // from `onCreate` so this helper is robust against a partially-initialised
-    // database file.
+    await _applyV2(db);
     await _ensureUserVersion(db, schemaVersion);
   }
 
@@ -157,15 +223,23 @@ class LocalDb {
   }
 
   static Future<void> _onCreate(Database db, int version) async {
-    await db.execute(_createV1);
+    // New databases receive the current schema directly.
+    await db.execute(_createV2);
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     // Each branch is a monotonic upgrade. When the next schema bump is
-    // added, add `if (oldVersion < 2) { ... }` etc. — DO NOT edit the
+    // added, add `if (oldVersion < 3) { ... }` etc. — DO NOT edit the
     // v1 path above.
     if (oldVersion < 1) {
       await db.execute(_createV1);
+    }
+    if (oldVersion < 2) {
+      // v1 → v2: Ticket #31 vault at-rest encryption envelope. Existing
+      // v1 rows get NULL for the new BLOB columns; the new [VaultStore]
+      // only reads rows it created itself, so legacy rows are preserved
+      // but ignored.
+      await _applyV2(db);
     }
   }
 
