@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Firebase Core, Firestore, Storage initialized on app start
-- [ ] Config file present (Firebase-generated, checked in — flag in README that this is a demo project)
-- [ ] App builds and runs without crashing when offline (Firestore must not block startup)
-- [ ] `relay/{channel_id}/messages` schema documented: `{ id, sender_id, created_at, payload_b64, ratchet_header?, ttl, hop_count, signature, expires_at }`
-- [ ] All entries include `expires_at` (server-side TTL via Firestore TTL policy in console; documented in README)
+- [x] Firebase Core, Firestore, Storage initialized on app start
+- [x] Config file present (Firebase-generated, checked in — flag in README that this is a demo project)
+- [x] App builds and runs without crashing when offline (Firestore must not block startup)
+- [x] `relay/{channel_id}/messages` schema documented: `{ id, sender_id, created_at, payload_b64, ratchet_header?, ttl, hop_count, signature, expires_at }`
+- [x] All entries include `expires_at` (server-side TTL via Firestore TTL policy in console; documented in README)
