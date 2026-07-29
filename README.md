@@ -51,3 +51,79 @@ See `lib/features/gateway/toggle.dart` for the implementation and
 `test/features/gateway/toggle_test.dart` for the test suite (11 widget
 tests covering the tap-when-off flow, tap-when-on flow, persistence across
 restart, and verbatim spec-text matching).
+
+## Firebase setup
+
+The repository ships with a **placeholder** `lib/firebase_options.dart`
+that contains fake placeholder values for the API key, app id, project id,
+and storage bucket. This is intentional — no real Firebase project exists
+for this repo. The app handles the placeholder gracefully by starting in
+**local-only mode** (Bluetooth mesh, secure storage, vault capture at rest,
+and ALERT verification against the locally cached allowlist all keep
+working). Features that DO need a backend (internet relay push, gateway
+pull, vault deliver-on-connect, allowlist refresh) silently no-op until
+real Firebase credentials are provisioned.
+
+`lib/backend/firebase.dart::FirebaseBackend.isInitialized` is the single
+flag to check before touching Firestore or Storage. `isLocalOnlyMode`
+exposes the inverse for the capability-disclosure screen.
+
+### One-time setup to wire up a real Firebase project
+
+1. **Create a Firebase project** in the Firebase console:
+   <https://console.firebase.google.com/>. Use any project id you control.
+
+2. **Enable Cloud Firestore** (Native mode) and **Firebase Storage** in
+   the project. Both are under the "Build" section of the console.
+
+3. **Install the FlutterFire CLI** if you don't have it:
+   ```bash
+   dart pub global activate flutterfire_cli
+   ```
+
+4. **Generate the per-platform config** from the repository root:
+   ```bash
+   flutterfire configure --project=<your-firebase-project-id>
+   ```
+   This will overwrite the placeholder `lib/firebase_options.dart` with a
+   real, per-platform config (Android, iOS, web, macOS, Windows) pulled
+   from your Firebase project. The generated file is the canonical one to
+   check in for your deployment.
+
+5. **Configure the server-side TTL policy** in the Firebase console. The
+   app writes an `expires_at` field on every document in the `relay`,
+   `relay_direct`, `verified_orgs`, and `evidence` collections (see
+   `docs/firestore-schema.md`). The TTL policy reads that field and
+   deletes expired documents (typically within 24 hours of expiry,
+   per Google's docs).
+   - In the console: **Firestore** → **Rules & Settings** → **TTL
+     Policies** → **Create TTL policy**.
+   - For each of the four collections, set:
+     - **Field name:** `expires_at`
+     - **Target collection:** the collection name (e.g. `relay`)
+   - Repeat for `relay_direct`, `verified_orgs`, and `evidence`.
+
+   Without this step, documents accumulate in Firestore forever. The app
+   is otherwise unaffected — TTL is a server-side cleanup, not a client
+   contract.
+
+6. **Restart the app**: `flutter run` again. The home screen should
+   switch from "Backend: local-only mode" to "Backend: connected".
+
+### What the placeholder is for
+
+The placeholder config is checked in so that:
+
+- `flutter analyze` and `flutter build apk --debug` succeed for any
+  collaborator without Firebase credentials.
+- The smoke test runs without network access.
+- A reviewer can clone the repo and run it offline to see the mesh
+  behaviour without committing to a Firebase project.
+
+## Firestore schema
+
+The Firestore schema for `relay/{channel_id}/messages`,
+`relay_direct/{recipient_id}/messages`, `verified_orgs/{org_id}`, and
+`evidence/{recipient_id}/records` is documented in
+[`docs/firestore-schema.md`](docs/firestore-schema.md). The typed Dart
+field-name constants live in `lib/backend/schemas.dart`.
