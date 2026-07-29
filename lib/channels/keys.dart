@@ -67,14 +67,13 @@ class ChannelKeyStore {
   static Future<ChannelKeyStore> instance() async {
     final s = _singleton;
     if (s != null) return s;
-    // Defer to SecretsStore so we share its default-options construction
-    // (iOS first_unlock accessibility etc.) rather than duplicating it.
-    final secrets = await SecretsStore.instance();
+    // Touch SecretsStore so its default-options construction
+    // (iOS first_unlock accessibility etc.) is exercised at startup
+    // alongside ours. We don't share SecretsStore's underlying
+    // FlutterSecureStorage: each instance has its own in-memory cache,
+    // and coupling the two stores would make future refactors harder.
+    await SecretsStore.instance();
     final created = ChannelKeyStore.withStorage(
-      // We don't have access to SecretsStore's underlying FlutterSecureStorage,
-      // so we open a sibling one with the same defaults. flutter_secure_storage
-      // caches per-instance state; sharing the singleton from SecretsStore would
-      // couple two unrelated stores, so we deliberately keep them separate.
       const FlutterSecureStorage(
         iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
       ),
