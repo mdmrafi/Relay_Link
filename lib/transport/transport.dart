@@ -167,3 +167,19 @@ class LoopbackTransport implements Transport {
     }
   }
 }
+
+/// Thrown by a [Transport.send] when the transport is currently
+/// unavailable (e.g. Bluetooth radio off, no cellular coverage). Callers
+/// should treat this as a non-error condition: the message is dropped
+/// silently, the caller may retry later. This is distinct from a wire /
+/// serialization failure, which surfaces as a regular [Object] error via
+/// the `safeSend` wrapper in [TransportManager].
+class TransportUnavailableException implements Exception {
+  TransportUnavailableException(this.transportName);
+
+  /// Name of the transport that was unavailable (e.g. `'mesh'`).
+  final String transportName;
+
+  @override
+  String toString() => 'TransportUnavailableException($transportName)';
+}
