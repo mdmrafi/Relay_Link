@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Method `sendSms(phoneNumber, body)` works (Android), returns true on success
-- [ ] BroadcastReceiver registered in AndroidManifest, receives incoming SMS, parses body, calls Dart callback
-- [ ] Runtime permissions requested with rationale before any SMS operation
-- [ ] iOS: methods exist but return PlatformException with "SMS unavailable on iOS"
-- [ ] §3.1 capability disclosure includes the SMS status (see #30)
+- [x] Method `sendSms(phoneNumber, body)` works (Android), returns true on success
+- [x] BroadcastReceiver registered in AndroidManifest, receives incoming SMS, parses body, calls Dart callback
+- [x] Runtime permissions requested with rationale before any SMS operation
+- [x] iOS: methods exist but return PlatformException with "SMS unavailable on iOS"
+- [x] §3.1 capability disclosure includes the SMS status (see #30)
