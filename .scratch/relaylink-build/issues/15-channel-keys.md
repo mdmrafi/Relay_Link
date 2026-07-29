@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] `generateKey()` returns a fresh random 32-byte AES key
-- [ ] `addChannel(channelId, key)` stores the key
-- [ ] `getChannelKey(channelId)` returns the key, or null if not joined
-- [ ] `listChannels()` returns all joined channel IDs
-- [ ] "public" channel is auto-added on first launch with the default network key from #03
-- [ ] Tests: generate, add, get, list round-trip works
+- [x] `generateKey()` returns a fresh random 32-byte AES key
+- [x] `addChannel(channelId, key)` stores the key
+- [x] `getChannelKey(channelId)` returns the key, or null if not joined
+- [x] `listChannels()` returns all joined channel IDs
+- [x] "public" channel is auto-added on first launch with the default network key from #03
+- [x] Tests: generate, add, get, list round-trip works
