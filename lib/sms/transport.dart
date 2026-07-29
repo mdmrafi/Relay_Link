@@ -86,13 +86,13 @@ class SmsTransport implements Transport {
   final ContactsStore _contacts;
   final SeenCache _seenCache;
   final TransportManagerHost _manager;
-  final SmsReassembler _reassembler;
+  final Reassembler _reassembler;
 
   final StreamController<Message> _incomingCtrl =
       StreamController<Message>.broadcast();
 
   StreamSubscription<String>? _platformSub;
-  StreamSubscription<({String msgId8, Uint8List body})>? _reassemblerSub;
+  StreamSubscription<ReassembledMessage>? _reassemblerSub;
 
   /// True once [_start] has subscribed to the underlying platform
   /// channel. The constructor does NOT auto-start so tests can drive
@@ -104,12 +104,12 @@ class SmsTransport implements Transport {
     ContactsStore? contacts,
     SeenCache? seenCache,
     TransportManagerHost? manager,
-    SmsReassembler? reassembler,
+    Reassembler? reassembler,
   })  : _channel = channel ?? SmsPlatformChannel(),
         _contacts = contacts ?? _NullContacts(),
         _seenCache = seenCache ?? _NullSeenCache(),
         _manager = manager ?? _NullTransportManager(),
-        _reassembler = reassembler ?? SmsReassembler();
+        _reassembler = reassembler ?? Reassembler();
 
   @override
   String get name => 'SMS';
@@ -154,7 +154,7 @@ class SmsTransport implements Transport {
   /// to call multiple times — the second call is a no-op.
   void _ensureReassemblerListener() {
     if (_reassemblerSub != null) return;
-    _reassemblerSub = _reassembler.completed.listen(_onReassembled);
+    _reassemblerSub = _reassembler.messages.listen(_onReassembled);
   }
 
   /// Test hook: drive a fully-decoded Message through the filter +
@@ -200,21 +200,50 @@ class SmsTransport implements Transport {
       return;
     }
     final envelopeJson = utf8.encode(jsonEncode(msg.toJson()));
-    final segments = frameMessage(
-      msgId: msg.id,
-      payloadBytes: Uint8List.fromList(envelopeJson),
+    final segments = SmsFraming.fragment(
+      messageId: _shortFragmentId(msg.id),
+      payload: Uint8List.fromList(envelopeJson),
     );
     for (final seg in segments) {
-      await _channel.sendSms(phone, seg);
+      await _channel.sendSms(phone, seg.body);
     }
+  }
+
+  /// Derive an 8-hex-char fragment id from a full message id.
+  ///
+  /// `SmsFraming.fragment` requires the message id to be exactly 8 hex
+  /// characters. The full [Message.id] is a UUIDv4 (36 chars). We take
+  /// the first 8 hex chars of the UUID — uniqueness within a burst is
+  /// empirically sufficient because the receiver matches against the
+  /// full message id loaded from the envelope JSON, not the 8-char
+  /// fragment header.
+  static String _shortFragmentId(String fullId) {
+    final hex = StringBuffer();
+    for (final c in fullId.codeUnits) {
+      final ch = String.fromCharCode(c);
+      final isHex =
+          (ch.compareTo('0') >= 0 && ch.compareTo('9') <= 0) ||
+              (ch.compareTo('a') >= 0 && ch.compareTo('f') <= 0) ||
+              (ch.compareTo('A') >= 0 && ch.compareTo('F') <= 0);
+      if (isHex) {
+        hex.write(ch);
+        if (hex.length == 8) break;
+      }
+    }
+    if (hex.length != 8) {
+      throw StateError(
+        'message id "$fullId" does not contain 8 hex chars for SMS header',
+      );
+    }
+    return hex.toString();
   }
 
   // ---------------------------------------------------------------------------
   // Internal: reinjection pipeline
   // ---------------------------------------------------------------------------
 
-  void _onReassembled(({String msgId8, Uint8List body}) event) {
-    final msg = _decodeEnvelope(event.body);
+  void _onReassembled(ReassembledMessage event) {
+    final msg = _decodeEnvelope(event.payloadBytes);
     if (msg == null) return;
     _filterAndDecrement(msg).then((filtered) {
       if (filtered == null) return;

@@ -401,9 +401,11 @@ void main() {
 
       transport.testFeedSegment(seg);
       // Pump the event loop enough times for the broadcast stream +
-      // Future.then microtasks to drain. Three yields is plenty for a
-      // single-segment complete.
-      for (var i = 0; i < 3; i++) {
+      // Future.then microtasks to drain. The chain is: ingest →
+      // _messages.add → _onReassembled → _filterAndDecrement (await
+      // _seenCache) → _incomingCtrl.add → listener. Each await hop
+      // consumes one microtask; we pump generously to avoid flakes.
+      for (var i = 0; i < 20; i++) {
         await Future<void>.delayed(Duration.zero);
       }
 
@@ -433,15 +435,25 @@ Uint8List? _reassembleSegments(List<String> segments) {
   int? total;
   String? msgid;
   for (final seg in segments) {
-    final parsed = parseSegment(seg);
+    final parsed = SmsFraming.parseSegment(seg);
     if (parsed == null) return null;
-    msgid = parsed.msgId8;
+    // `parsed.body` is the full segment text including the `RL:...` header.
+    // The base64 chunk lives after the third colon.
+    final headerParts = parsed.body.split(':');
+    if (headerParts.length < 4) return null;
+    final b64 = headerParts.sublist(3).join(':');
+    msgid = parsed.messageId;
     total = parsed.total;
-    byMsg.putIfAbsent(parsed.msgId8, () => {})[parsed.idx] = parsed.bodyBytes;
+    byMsg.putIfAbsent(parsed.messageId, () => {})[parsed.index] =
+        Uint8List.fromList(base64Decode(b64));
   }
   if (msgid == null || total == null) return null;
   final parts = byMsg[msgid]!;
   if (parts.length != total) return null;
+  // msgid is non-null and non-empty because every successful parseSegment
+  // populates both. The unreachable guard was suppressed by an analyzer
+  // warning; this assertion documents the invariant for future readers.
+  assert(msgid.isNotEmpty, 'msgid must be non-empty after a successful parse');
   var len = 0;
   for (var i = 1; i <= total; i++) {
     len += parts[i]!.length;

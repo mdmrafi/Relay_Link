@@ -22,7 +22,7 @@ void main() {
       final completer = Completer<ReassembledMessage>();
       final sub = reassembler.messages.listen(completer.complete);
 
-      final segment = 'RL:aabbcc11:0/1:aGVsbG8='; // "hello"
+      final segment = 'RL:aabbcc11:1/1:aGVsbG8='; // "hello"
       reassembler.ingest(segment);
 
       final msg = await completer.future.timeout(const Duration(seconds: 1));
@@ -47,16 +47,16 @@ void main() {
       final msgId = '11223344';
 
       // Build out-of-order segments: 2, 0, 1, 4, 3, 5, 6, (duplicate 2)
-      reassembler.ingest(_segment(msgId, 2, total, chunks[2]));
-      reassembler.ingest(_segment(msgId, 0, total, chunks[0]));
-      reassembler.ingest(_segment(msgId, 1, total, chunks[1]));
-      reassembler.ingest(_segment(msgId, 4, total, chunks[4]));
-      reassembler.ingest(_segment(msgId, 3, total, chunks[3]));
-      reassembler.ingest(_segment(msgId, 5, total, chunks[5]));
-      reassembler.ingest(_segment(msgId, 6, total, chunks[6]));
+      reassembler.ingest(_segment(msgId, 3, total, chunks[2]));
+      reassembler.ingest(_segment(msgId, 1, total, chunks[0]));
+      reassembler.ingest(_segment(msgId, 2, total, chunks[1]));
+      reassembler.ingest(_segment(msgId, 5, total, chunks[4]));
+      reassembler.ingest(_segment(msgId, 4, total, chunks[3]));
+      reassembler.ingest(_segment(msgId, 6, total, chunks[5]));
+      reassembler.ingest(_segment(msgId, 7, total, chunks[6]));
       // Duplicate of segment 2 — should be silently ignored, no double-emit.
       final before = reassembler.duplicateCount;
-      reassembler.ingest(_segment(msgId, 2, total, chunks[2]));
+      reassembler.ingest(_segment(msgId, 3, total, chunks[2]));
       expect(reassembler.duplicateCount, before + 1);
 
       // Allow emissions to drain.
@@ -90,9 +90,9 @@ void main() {
       final chunks = _chunkBase64('incomplete', 4);
       final total = 5;
       // Only feed 3 of 5 segments.
-      reassembler.ingest(_segment(msgId, 0, total, chunks[0]));
-      reassembler.ingest(_segment(msgId, 1, total, chunks[1]));
-      reassembler.ingest(_segment(msgId, 2, total, chunks[2]));
+      reassembler.ingest(_segment(msgId, 1, total, chunks[0]));
+      reassembler.ingest(_segment(msgId, 2, total, chunks[1]));
+      reassembler.ingest(_segment(msgId, 3, total, chunks[2]));
 
       // Advance just past 10 minutes from the last ingestion.
       clock.advance(const Duration(minutes: 10, seconds: 1));
@@ -125,7 +125,7 @@ void main() {
       final msgId = '99aabbcc';
       final chunks = _chunkBase64('partial', 5);
       final total = 4;
-      reassembler.ingest(_segment(msgId, 0, total, chunks[0]));
+      reassembler.ingest(_segment(msgId, 1, total, chunks[0]));
       expect(reassembler.activeMessageIds, contains(msgId));
 
       clock.advance(const Duration(minutes: 11));
@@ -146,7 +146,7 @@ void main() {
       final msgId = 'aabbccdd';
       final chunks = _chunkBase64('payload', 8);
       final total = 3;
-      reassembler.ingest(_segment(msgId, 0, total, chunks[0]));
+      reassembler.ingest(_segment(msgId, 1, total, chunks[0]));
 
       clock.advance(const Duration(minutes: 5));
       final evicted = reassembler.flushExpired();
@@ -169,17 +169,17 @@ void main() {
       final total = chunks.length;
 
       // Feed segments in bursts of 2 with delays between them.
-      reassembler.ingest(_segment(msgId, 0, total, chunks[0]));
-      reassembler.ingest(_segment(msgId, 1, total, chunks[1]));
+      reassembler.ingest(_segment(msgId, 1, total, chunks[0]));
+      reassembler.ingest(_segment(msgId, 2, total, chunks[1]));
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      reassembler.ingest(_segment(msgId, 2, total, chunks[2]));
+      reassembler.ingest(_segment(msgId, 3, total, chunks[2]));
       if (total > 3) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
-        reassembler.ingest(_segment(msgId, 3, total, chunks[3]));
+        reassembler.ingest(_segment(msgId, 4, total, chunks[3]));
       }
       if (total > 4) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
-        reassembler.ingest(_segment(msgId, 4, total, chunks[4]));
+        reassembler.ingest(_segment(msgId, 5, total, chunks[4]));
       }
 
       final msg = await completer.future.timeout(const Duration(seconds: 1));
@@ -221,7 +221,7 @@ void main() {
         final reassembler = Reassembler();
         final sub = reassembler.messages.listen((_) {});
 
-        reassembler.ingest('RL:zzzzzzzz:0/1:abc=');
+        reassembler.ingest('RL:zzzzzzzz:1/1:abc=');
         expect(reassembler.rejectedCount, 1);
 
         await sub.cancel();
@@ -232,8 +232,8 @@ void main() {
         final reassembler = Reassembler();
         final sub = reassembler.messages.listen((_) {});
 
-        reassembler.ingest('RL:abc:0/1:abc='); // 3 chars
-        reassembler.ingest('RL:abcdefghij:0/1:abc='); // 10 chars
+        reassembler.ingest('RL:abc:1/1:abc='); // 3 chars
+        reassembler.ingest('RL:abcdefghij:1/1:abc='); // 10 chars
         expect(reassembler.rejectedCount, 2);
 
         await sub.cancel();
@@ -253,13 +253,14 @@ void main() {
         await reassembler.dispose();
       });
 
-      test('rejects segment with idx >= total', () async {
+      test('rejects segment with idx > total', () async {
         final reassembler = Reassembler();
         final sub = reassembler.messages.listen((_) {});
 
-        reassembler.ingest('RL:aabbcc11:5/5:abc='); // idx == total
-        reassembler.ingest('RL:aabbcc11:7/5:abc='); // idx > total
-        expect(reassembler.rejectedCount, 2);
+        // Indices are 1-based per the #24 wire format — `idx == total`
+        // is valid (the last segment); only `idx > total` is malformed.
+        reassembler.ingest('RL:aabbcc11:7/5:abc=');
+        expect(reassembler.rejectedCount, 1);
 
         await sub.cancel();
         await reassembler.dispose();
@@ -269,7 +270,7 @@ void main() {
         final reassembler = Reassembler();
         final sub = reassembler.messages.listen((_) {});
 
-        reassembler.ingest('RL:aabbcc11:0/0:abc=');
+        reassembler.ingest('RL:aabbcc11:1/0:abc=');
         expect(reassembler.rejectedCount, 1);
 
         await sub.cancel();
@@ -281,7 +282,7 @@ void main() {
         final sub = reassembler.messages.listen((_) {});
 
         // '!' is not a valid base64 character.
-        reassembler.ingest('RL:aabbcc11:0/1:!!!');
+        reassembler.ingest('RL:aabbcc11:1/1:!!!');
         expect(reassembler.rejectedCount, 1);
 
         await sub.cancel();
@@ -295,13 +296,13 @@ void main() {
 
         // Garbage first.
         reassembler.ingest('garbage');
-        reassembler.ingest('RL:bogus:0/1:');
-        reassembler.ingest('RL:aabbcc11:0/1:!!');
+        reassembler.ingest('RL:bogus:1/1:');
+        reassembler.ingest('RL:aabbcc11:1/1:!!');
 
         // Then a valid segment.
         final completer = Completer<ReassembledMessage>();
         final s2 = reassembler.messages.listen(completer.complete);
-        reassembler.ingest('RL:aabbcc11:0/1:aGVsbG8=');
+        reassembler.ingest('RL:aabbcc11:1/1:aGVsbG8=');
         final msg = await completer.future.timeout(const Duration(seconds: 1));
         expect(_utf8(msg), 'hello');
 
@@ -317,20 +318,23 @@ void main() {
       final sub = reassembler.messages.listen(emitted.add);
 
       // Two interleaved messages, both completed across the same stream.
-      final a = _chunkBase64('A-payload', 5);
-      final b = _chunkBase64('B-payload', 5);
-      final tA = a.length;
-      final tB = b.length;
+      // We pick payloads that produce exactly 2 chunks each at chunkSize=7.
+      // base64('A-payload') = 'QS1wYXlsb2Fk' (12 chars) → ceil(12/7) = 2.
+      // base64('B-payload') = 'Qi1wYXlsb2Fk' (12 chars) → ceil(12/7) = 2.
+      final a = _chunkBase64('A-payload', 7); // 2 chunks
+      final b = _chunkBase64('B-payload', 7); // 2 chunks
+      expect(a, hasLength(2));
+      expect(b, hasLength(2));
+      final tA = a.length; // 2
+      final tB = b.length; // 2
       final idA = 'aaaaaaaa';
       final idB = 'bbbbbbbb';
 
-      // Interleave from both messages.
-      reassembler.ingest(_segment(idA, 1, tA, a[1]));
-      reassembler.ingest(_segment(idB, 0, tB, b[0]));
-      reassembler.ingest(_segment(idA, 0, tA, a[0]));
-      reassembler.ingest(_segment(idB, 1, tB, b[1]));
-      reassembler.ingest(_segment(idA, 2, tA, a[2]));
-      reassembler.ingest(_segment(idB, 2, tB, b[2]));
+      // Interleave from both messages. Wire indices are 1-based.
+      reassembler.ingest(_segment(idA, 2, tA, a[1])); // wire idx 2 = chunk a[1]
+      reassembler.ingest(_segment(idB, 1, tB, b[0])); // wire idx 1 = chunk b[0]
+      reassembler.ingest(_segment(idA, 1, tA, a[0])); // wire idx 1 = chunk a[0]
+      reassembler.ingest(_segment(idB, 2, tB, b[1])); // wire idx 2 = chunk b[1]
 
       // Drain microtasks.
       await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -354,7 +358,7 @@ void main() {
       final sub = reassembler.messages.listen(emitted.add);
 
       final msgId = 'feedface';
-      reassembler.ingest(_segment(msgId, 0, 1, _b64('first')));
+      reassembler.ingest(_segment(msgId, 1, 1, _b64('first')));
 
       // Drain.
       await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -362,7 +366,7 @@ void main() {
       expect(_utf8(emitted.first), 'first');
 
       // Second "complete" message with same msgid: should NOT emit again.
-      reassembler.ingest(_segment(msgId, 0, 1, _b64('second')));
+      reassembler.ingest(_segment(msgId, 1, 1, _b64('second')));
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(emitted, hasLength(1),
           reason: 'replay suppression should swallow duplicate complete msgs');
@@ -436,6 +440,7 @@ List<String> _chunkBase64(String s, int chunkSize) {
 }
 
 /// Local framer matching the #24 wire format `RL:<8-hex>:<idx>/<total>:<b64>`.
+/// Indices are 1-based per the canonical SmsFraming.fragment contract.
 List<String> _fragmentLocal(
   String messageId,
   List<int> payload,
@@ -453,7 +458,8 @@ List<String> _fragmentLocal(
     final start = i * chunkSize;
     final end = (start + chunkSize).clamp(0, enc.length);
     final chunk = enc.substring(start, end);
-    out.add('$header$i/$total:$chunk');
+    // 1-based wire index: i ranges over [0, total), emit (i+1)/total.
+    out.add('$header${i + 1}/$total:$chunk');
   }
   return out;
 }

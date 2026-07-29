@@ -305,7 +305,12 @@ class Reassembler {
     final total = int.tryParse(totalStr);
     if (idx == null || total == null) return null;
     if (total <= 0) return null;
-    if (idx < 0 || idx >= total) return null;
+    // Indices are 1-based per Ticket #24's wire format
+    // (`SmsFraming.fragment` writes `index: i + 1`). Accept any index
+    // in [1, total]; reject 0 and any value > total.
+    if (idx < 1 || idx > total) return null;
+    // Convert to 0-based internal storage; `_Buffer` uses 0-based.
+    final idx0 = idx - 1;
 
     final chunk = trimmed.substring(idxEnd + 1);
     // Empty chunk is valid for single-segment messages only (the whole
@@ -318,7 +323,7 @@ class Reassembler {
     // chunks are concatenated at buffer completion.
     if (!_isBase64Alphabet(chunk)) return null;
 
-    return _Parsed(messageId: msgId, idx: idx, total: total, chunk: chunk);
+    return _Parsed(messageId: msgId, idx: idx0, total: total, chunk: chunk);
   }
 
   static bool _isHex(String s) {
