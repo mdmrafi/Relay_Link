@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] First online launch: pulls allowlist, caches locally
-- [ ] Subsequent launches (online or offline): use cache, refresh if > 24h old
-- [ ] `isVerified(pubkey)` checks against cached set, returns true/false
-- [ ] If allowlist collection is empty, no error — just `isVerified` always returns false
-- [ ] Tests: cache hit, cache miss with refresh, cache miss with no refresh possible (offline) all behave correctly
+- [x] First online launch: pulls allowlist, caches locally
+- [x] Subsequent launches (online or offline): use cache, refresh if > 24h old
+- [x] `isVerified(pubkey)` checks against cached set, returns true/false
+- [x] If allowlist collection is empty, no error — just `isVerified` always returns false
+- [x] Tests: cache hit, cache miss with refresh, cache miss with no refresh possible (offline) all behave correctly
