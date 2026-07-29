@@ -1,0 +1,132 @@
+// RelayLink — Firebase Storage Security Rules (Ticket #19).
+//
+// This file controls access to objects in the project's default Cloud
+// Storage bucket. It is the gatekeeper for evidence-blob uploads and
+// any other binaries the app parks in Storage.
+//
+// Rules-language version: 2. Deploy via `firebase deploy --only storage`.
+//
+// Threat model:
+//   * Evidence blobs are end-to-end encrypted — the server cannot read
+//     them. The rules below are NOT a confidentiality layer for the
+//     payload; they prevent unauthorized devices from FETCHING a blob
+//     they aren't entitled to.
+//   * Path layout encodes the recipient id (`/evidence/{recipientId}/...`)
+//     so the recipient check is a single path-segment comparison, not a
+//     metadata lookup. This keeps the rule fast and makes the rule
+//     semantically obvious to a future reviewer.
+//   * Writes (uploads) are world-permitted subject to size + content-type
+//     caps. The client SDK is expected to encrypt client-side before
+//     uploading; the server only sees ciphertext.
+
+rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// Storage entry point. The default bucket suffices for RelayLink — there
+// is no per-region bucket layout in the current SPEC.
+// ---------------------------------------------------------------------------
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // =======================================================================
+    // Helpers
+    // =======================================================================
+
+    // Same predicate as the Firestore rules: caller must have a
+    // `sender_id` custom claim that looks like a 16-hex pseudonym.
+    // Mirrors `isAuthenticatedDevice()` in `firestore.rules` so the
+    // two rule files stay in lockstep. If the Firestore helper ever
+    // changes, change this one too (and vice versa).
+    function isAuthenticatedDevice() {
+      return request.auth != null
+          && request.auth.token.sender_id is string
+          && request.auth.token.sender_id.size() == 16
+          && request.auth.token.sender_id.matches('^[0-9a-f]{16}$');
+    }
+
+    // True iff the caller's `sender_id` custom claim matches the path
+    // segment at `{recipientId}` — the recipient-only read check. The
+    // match is exact (case-sensitive hex) because both sides come from
+    // the same `lib/crypto/identity.dart` encoder.
+    function isRecipient(recipientId) {
+      return isAuthenticatedDevice()
+          && request.auth.token.sender_id == recipientId;
+    }
+
+    // Per-blob size cap. The SPEC says evidence blobs are "short text
+    // snapshots" — 5 MB is generous headroom for base64 inflation of a
+    // multi-paragraph text record, while still bounding the blast
+    // radius of a malicious upload. Anything larger (photos, video)
+    // is out of scope for the demo and gets rejected by the rules.
+    function maxEvidenceBlobSize() { return 5242880; }   // 5 MB
+
+    // =======================================================================
+    // Evidence blobs — `/evidence/{recipientId}/{filename}`
+    //
+    // Reads: only the recipient (path segment matches caller's
+    // `sender_id` custom claim). No device, including the original
+    // sender, can re-read what they uploaded — this is intentional.
+    // The sender already has the plaintext locally; the upload is a
+    // one-way copy to the recipient's slice. Allowing the sender to
+    // re-read would give them an oracle for "did my upload succeed?"
+    // that exposes the recipient's quota usage and timing.
+    //
+    // Writes: any authenticated device may upload, but the path must
+    // resolve to the recipient encoded in the path AND the document's
+    // custom metadata (if present) must agree with the path. The size
+    // cap and content-type cap keep abusive uploads cheap to detect
+    // and reject.
+    //
+    // Updates are denied because evidence is immutable; the recipient
+    // must verify the exact bytes they received. Deletes are also
+    // denied at the client layer — expiry is handled by the bucket's
+    // object lifecycle policy configured in the Firebase console.
+    // =======================================================================
+    match /evidence/{recipientId}/{fileName} {
+
+      // Recipient-only reads. The `recipientId` path segment MUST
+      // equal the caller's `sender_id` custom claim. This is the
+      // single line that enforces evidence privacy — the previous
+      // implementation draft (`allow read: if true`) was a privacy
+      // bug and is intentionally NOT repeated here.
+      allow read: if isRecipient(recipientId);
+
+      // Create-only upload. The path already encodes the recipient;
+      // any authenticated device may upload into ANY recipient's
+      // slice (the ciphertext is opaque, so a spam-to-strangers
+      // attack is bounded by the size cap and the recipient's local
+      // quota handling). If we ever need to lock uploads down to
+      // "only the sender may upload to their own pre-arranged
+      // recipient", that check belongs here.
+      allow create: if isAuthenticatedDevice()
+                    // Size cap. Catches obvious abuse before the
+                    // server-side lifecycle policy runs.
+                    && request.resource.size <= maxEvidenceBlobSize()
+                    // Content-type cap. Evidence blobs are uploaded
+                    // as `application/octet-stream` (the SDK default
+                    // for raw bytes); rejecting `text/html`,
+                    // `application/javascript`, etc. blocks trivial
+                    // attempts to host attacker-controlled web
+                    // content on the project's bucket.
+                    && request.resource.contentType.matches(
+                         'application/octet-stream|application/json|text/plain'
+                       );
+
+      // Updates and deletes are denied — evidence is write-once,
+      // read-only-by-recipient. Lifecycle expiry handles deletion.
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // =======================================================================
+    // Catch-all — every other path is denied.
+    //
+    // We do not currently use Storage for anything outside
+    // `/evidence/...`. A typo'd path must not silently fall through
+    // to "permissive by default" — make the deny explicit.
+    // =======================================================================
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

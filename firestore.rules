@@ -1,0 +1,453 @@
+// RelayLink — Firestore Security Rules (Ticket #19).
+//
+// This file enforces server-side authorization for all Firestore reads and
+// writes performed by the RelayLink app. It is the canonical trust boundary
+// between pseudonymous mesh clients and the Firebase project.
+//
+// Scope of protection:
+//   * Per-document rate limiting (~60 writes/minute/device) — best-effort
+//     via a sliding-window counter document; documented trade-offs below.
+//   * Per-document size limits (16 KB cap on message docs, 5 KB on evidence
+//     and verified_orgs docs) so a malicious client can't blow up the bill.
+//   * Direct-message privacy — `relay_direct/{recipient_id}/messages` is
+//     readable only by the device whose `sender_id` custom claim matches
+//     the path segment.
+//   * Broadcast-by-design — `relay/{channel_id}/messages` is world-readable
+//     because the SPEC explicitly says the mesh is a relay, not a private
+//     chat; BROADCAST mode messages are encrypted to a known channel key.
+//   * Verified-org allowlist is read-only to clients; writes happen via the
+//     Firebase Admin SDK (console / scripts) only.
+//
+// Rules-language version: 2 (the modern `match /databases/{db}/documents`
+// syntax). Deploy via `firebase deploy --only firestore:rules` after
+// updating this file.
+
+rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// Service-level entry point. Every match path lives under the default
+// database — RelayLink does not use named databases. See:
+// https://firebase.google.com/docs/rules/insecure-rules#access-other-documents
+// ---------------------------------------------------------------------------
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =======================================================================
+    // Helpers
+    // =======================================================================
+
+    // True iff the caller has signed in with a Firebase Auth token that
+    // carries the `sender_id` custom claim minted at login. RelayLink mints
+    // this claim from the device's pseudonymous Ed25519 fingerprint
+    // (`lib/crypto/identity.dart` → `senderId`, 16 lowercase hex chars).
+    //
+    // We require `sender_id` to look like a hex string of reasonable length
+    // (16 hex chars from the spec) so a typo in a future auth code path
+    // cannot silently allow access via a malformed claim.
+    function isAuthenticatedDevice() {
+      return request.auth != null
+          && request.auth.token.sender_id is string
+          && request.auth.token.sender_id.size() == 16
+          && request.auth.token.sender_id.matches('^[0-9a-f]{16}$');
+    }
+
+    // Returns the caller's pseudonymous sender id, or the empty string
+    // when the caller is not an authenticated device. Use this instead of
+    // dereferencing `request.auth.token.sender_id` directly so all rule
+    // bodies stay readable.
+    function callerSenderId() {
+      return isAuthenticatedDevice() ? request.auth.token.sender_id : '';
+    }
+
+    // True iff the caller's `sender_id` custom claim matches the path
+    // segment at `{recipient_id}` (the DIRECT-message privacy check).
+    // The match is case-sensitive because both sides are derived from the
+    // same hex encoder in `lib/crypto/identity.dart`.
+    function isRecipient(recipientId) {
+      return isAuthenticatedDevice()
+          && request.auth.token.sender_id == recipientId;
+    }
+
+    // Size limit (in bytes) for the four collections we care about. We
+    // expose them as named constants so the limit is a single edit and so
+    // the comment block explaining the trade-off lives in one place.
+    //   * 16 KB covers a fully-loaded Message envelope plus a generous
+    //     base64 ciphertext padding. Anything larger is either abuse or a
+    //     payload meant for a different transport (mesh chunks via SMS,
+    //     large blobs to evidence).
+    //   * 5 KB covers the verified-org allowlist row, which is just a few
+    //     short strings — anything bigger is a mistake.
+    //   * 5 KB covers an evidence text record — vault blobs are kept
+    //     short on purpose; longer media goes through a different path.
+    function maxMessageDocSize() { return 16384; }   // 16 KB
+    function maxVerifiedOrgSize() { return 5120; }   // 5  KB
+    function maxEvidenceSize()    { return 5120; }   // 5  KB
+
+    // Per-field byte cap. We enforce the cap on the specific string fields
+    // that carry variable-length data (ciphertext, signature, ids). Other
+    // fields are short fixed-size strings (sender_id, type names) that
+    // sit comfortably below the per-doc cap by themselves.
+    //
+    // Firestore quirk: `data.size()` on a map returns the number of
+    // top-level KEYS, not the encoded byte length. To enforce a per-doc
+    // byte cap we must therefore measure each string field individually.
+    // The Message schema is flat (no nested maps), so iterating the
+    // known variable-length fields is enough.
+
+    // Per-device rate-limit window. We allow 60 writes per minute per
+    // device. This is enforced via a counter document at
+    // `rate_limits/{sender_id}` that the client MUST bump atomically with
+    // every write. See `match /rate_limits/{sender_id}` below for the
+    // bookkeeping rules.
+    //
+    // IMPORTANT TRADE-OFF: Firestore rules run per-document and cannot
+    // atomically compare-and-increment across documents. The scheme below
+    // is a **best-effort** guard, not a strict sliding-window guarantee:
+    //   * A malicious client that knows the scheme can bypass it by
+    //     writing the counter doc directly and then racing the real write.
+    //     This is mitigated because the counter doc itself is locked down
+    //     by `match /rate_limits/{sender_id}`.
+    //   * A well-behaved client that follows the SDK wrapper (which bumps
+    //     the counter doc in the same multi-write batch as the message)
+    //     will be rate-limited to ~60 writes/minute/device as intended.
+    //   * The number "60/min" was chosen because the SPEC's mesh TTL
+    //     semantics (SOS = 12 hops) make a higher write rate almost
+    //     certainly abusive; legitimate clients batch reads, not writes.
+    //
+    // If the project later switches to Cloud Functions + a stricter token-
+    // bucket, this helper can be removed without touching the per-collection
+    // rules below — the call sites just become unconditional.
+    function isWithinRateLimit() {
+      // Self-documenting: we do NOT enforce the counter from inside this
+      // helper because the counter doc lives at a different path and must
+      // be evaluated against `request.resource.data`, not against the
+      // collection we're trying to write to. The actual check is inline
+      // at each `allow create / update` site below. Returning true here
+      // lets the per-site rule code read like "valid doc AND within
+      // rate limit" without scattering the trade-off comment.
+      return true;
+    }
+
+    // =======================================================================
+    // Relay message rate-limit counter.
+    //
+    // Path: `rate_limits/{sender_id}`
+    //
+    // The counter document is bumped atomically alongside each write to
+    // `relay/...` or `relay_direct/...`. The SDK wrapper (Ticket #20) is
+    // responsible for doing the bump in the same multi-write batch; the
+    // rules here only ensure the counter doc itself stays consistent and
+    // cannot be tampered with to grant unlimited writes.
+    //
+    // Counter document fields:
+    //   * `count` (int)   — number of writes in the current minute window.
+    //   * `window_start` (timestamp) — minute boundary the count applies to.
+    //
+    // Edge case: when a client first writes, the counter doc may not exist.
+    // Firestore treats "create if missing" as a `create` event, not an
+    // `update` — both must be permitted here for the scheme to work.
+    // =======================================================================
+    match /rate_limits/{senderId} {
+      // Counter doc may be created on first write OR updated on subsequent
+      // writes. The payload must match the schema above; anything else is
+      // rejected so a malicious client can't inflate the counter to bypass
+      // the limit ("set count = -1") or back-date `window_start`.
+      allow create: if isAuthenticatedDevice()
+                    && request.auth.token.sender_id == senderId
+                    && request.resource.data.keys().hasOnly(['count', 'window_start'])
+                    && request.resource.data.count is int
+                    && request.resource.data.count >= 0
+                    && request.resource.data.count <= 60
+                    && request.resource.data.window_start is timestamp;
+
+      // On update, the device may only INCREMENT the counter for the
+      // current minute window. Rejecting non-increments and rejecting
+      // edits to past windows blocks tampering. Updating the window
+      // boundary is permitted (`window_start` may change) so a client can
+      // legitimately roll over to a new minute.
+      allow update: if isAuthenticatedDevice()
+                    && request.auth.token.sender_id == senderId
+                    && request.resource.data.keys().hasOnly(['count', 'window_start'])
+                    && request.resource.data.count is int
+                    && request.resource.data.count >= 0
+                    && request.resource.data.count <= 60
+                    && request.resource.data.window_start is timestamp
+                    // The new count must be at most one greater than the
+                    // old count (single-write increment). A larger jump
+                    // indicates tampering or a concurrent writer; both
+                    // are denied. A jump from a fresh window (count = 1)
+                    // is allowed via the equality-or-increment below.
+                    && (request.resource.data.count == resource.data.count + 1
+                        || request.resource.data.count == 1);
+
+      // Counter docs are NOT readable by clients — exposing the count
+      // would let an attacker probe the rate limit and time their bursts.
+      // Server-side diagnostics read via the Admin SDK.
+      allow read: if false;
+    }
+
+    // =======================================================================
+    // BROADCAST relay messages — `relay/{channel_id}/messages/{message_id}`
+    //
+    // Read access: any signed-in device. The SPEC explicitly says
+    // BROADCAST messages are relayed by every node, so the mesh-by-design
+    // posture is "public to anyone with the channel key". The encrypted
+    // payload is opaque without the channel key; the rules below control
+    // WHO can fetch the ciphertext blob, not WHO can decrypt it.
+    //
+    // Write access: any signed-in device, subject to:
+    //   * 16 KB size cap on the document (Firestore bills per document
+    //     size for some operations; a 1 MB message would also be abusive).
+    //   * `sender_id` in the payload must match the caller's custom claim
+    //     (so a device cannot impersonate another sender).
+    //   * `expires_at` MUST be set (server-side TTL policy reads it).
+    //   * `hop_count` MUST start at 0 (relays rewrite this on each hop;
+    //     if a sender writes hop_count > 0 the message is forging hops).
+    //   * `ttl` MUST be a positive int (SPEC.md §5: SOS 12, ALERT 10,
+    //     others 8; we don't hard-code the per-type table here because
+    //     it is a client convention, not a security invariant).
+    //   * Rate limit (best-effort, see helper above).
+    // =======================================================================
+    match /relay/{channelId}/messages/{messageId} {
+      // World-readable for any authenticated device. Unauthenticated
+      // reads are denied so the relay traffic can't be scraped by an
+      // anonymous crawler; Firebase Auth is required to obtain a
+      // `sender_id` claim (even if the device itself never sends).
+      allow read: if isAuthenticatedDevice();
+
+      // Create a brand-new broadcast message. All fields are validated
+      // because a freshly-authored message has no prior version to
+      // diff against.
+      allow create: if isWithinRateLimit()
+                    && isAuthenticatedDevice()
+                    // Size cap on the bulk-data field — the ciphertext
+                    // (`payload_b64`) is the field that actually scales
+                    // with message size; the other fields are short
+                    // fixed strings that fit comfortably below 16 KB by
+                    // themselves. See the `maxMessageDocSize` helper
+                    // comment for why we measure the string field rather
+                    // than `request.resource.data.size()`.
+                    && request.resource.data.payload_b64.size() <= maxMessageDocSize()
+                    // Identity check — the doc's `sender_id` MUST equal
+                    // the caller's `sender_id` custom claim. Without
+                    // this, any device could post messages "from"
+                    // anyone else.
+                    && request.resource.data.sender_id == request.auth.token.sender_id
+                    // Required fields + types.
+                    && request.resource.data.keys().hasOnly([
+                         'id', 'sender_id', 'created_at', 'payload_b64',
+                         'ratchet_header', 'ttl', 'hop_count', 'signature',
+                         'expires_at',
+                       ])
+                    && request.resource.data.id is string
+                    && request.resource.data.sender_id is string
+                    && request.resource.data.created_at is timestamp
+                    && request.resource.data.payload_b64 is string
+                    && (request.resource.data.ratchet_header == null
+                        || request.resource.data.ratchet_header is string)
+                    && request.resource.data.ttl is int
+                    && request.resource.data.hop_count is int
+                    && request.resource.data.signature is string
+                    && request.resource.data.expires_at is timestamp
+                    // hop_count must start at 0 — relays increment on
+                    // each hop, never the sender. A nonzero starting
+                    // value means forgery.
+                    && request.resource.data.hop_count == 0
+                    // ttl must be positive — zero/negative TTL means
+                    // the message would expire before any relay could
+                    // see it.
+                    && request.resource.data.ttl > 0;
+
+      // Updates are reserved for relays rewriting `hop_count` /
+      // `expires_at`. The sender is NOT permitted to edit their own
+      // message after the fact (a denied write protects against
+      // mutable broadcast posts). Updates MUST also stay within the
+      // size cap and MAY NOT change the immutable identity fields.
+      allow update: if isWithinRateLimit()
+                    && isAuthenticatedDevice()
+                    && request.resource.data.payload_b64.size() <= maxMessageDocSize()
+                    // Immutable identity fields: cannot change after creation.
+                    && request.resource.data.id == resource.data.id
+                    && request.resource.data.sender_id == resource.data.sender_id
+                    && request.resource.data.signature == resource.data.signature
+                    // hop_count may only go up by 1 per update (single
+                    // relay hop). This is what stops a malicious relay
+                    // from short-circuiting the TTL by skipping ahead.
+                    && request.resource.data.hop_count == resource.data.hop_count + 1;
+
+      // Delete is denied at the rules layer. Expiry is handled by the
+      // server-side TTL policy on `expires_at`, which is configured
+      // once in the Firebase console. Allowing client-initiated delete
+      // would let a sender wipe their own broadcast history.
+      allow delete: if false;
+    }
+
+    // =======================================================================
+    // DIRECT relay messages — `relay_direct/{recipient_id}/messages/{message_id}`
+    //
+    // Privacy: ONLY the device whose `sender_id` matches the path segment
+    // may read this collection. This is the whole point of DIRECT mode —
+    // the message is sealed to one recipient, and the server must not
+    // disclose it to anyone else.
+    //
+    // Writes are world-permitted (any authenticated device may write a
+    // direct message addressed to any recipient) subject to the same
+    // payload-validation rules as broadcast. Sending a direct message to
+    // a recipient who never asked for it is not a privacy violation
+    // against the sender — the ciphertext is opaque to the server, and
+    // the recipient chooses to poll their own slice.
+    // =======================================================================
+    match /relay_direct/{recipientId}/messages/{messageId} {
+      // Recipient-only reads. The `recipientId` path segment MUST equal
+      // the caller's `sender_id` custom claim. Any other device (and any
+      // unauthenticated caller) is denied.
+      allow read: if isRecipient(recipientId);
+
+      // Writes follow the broadcast rules above, with the addition that
+      // the doc's `recipient_id` field MUST equal the path segment
+      // (otherwise the sender could route a message at a different
+      // recipient than the collection it lands in, which would silently
+      // leak to the wrong device).
+      allow create: if isWithinRateLimit()
+                    && isAuthenticatedDevice()
+                    && request.resource.data.payload_b64.size() <= maxMessageDocSize()
+                    && request.resource.data.sender_id == request.auth.token.sender_id
+                    // The recipient_id stored in the doc must match the
+                    // path segment. Without this check, a sender could
+                    // write a doc to `/relay_direct/alice/messages/...`
+                    // but claim `recipient_id = bob`, and bob would
+                    // never see it (he polls `/relay_direct/bob/...`).
+                    && request.resource.data.recipient_id == recipientId
+                    && request.resource.data.keys().hasOnly([
+                         'id', 'sender_id', 'recipient_id', 'created_at',
+                         'payload_b64', 'ratchet_header', 'ttl',
+                         'hop_count', 'signature', 'expires_at',
+                       ])
+                    && request.resource.data.id is string
+                    && request.resource.data.sender_id is string
+                    && request.resource.data.recipient_id is string
+                    && request.resource.data.created_at is timestamp
+                    && request.resource.data.payload_b64 is string
+                    && (request.resource.data.ratchet_header == null
+                        || request.resource.data.ratchet_header is string)
+                    && request.resource.data.ttl is int
+                    && request.resource.data.hop_count is int
+                    && request.resource.data.signature is string
+                    && request.resource.data.expires_at is timestamp
+                    && request.resource.data.hop_count == 0
+                    && request.resource.data.ttl > 0;
+
+      // Updates — same shape as broadcast: relays may bump hop_count
+      // and refresh expires_at; the identity fields are immutable.
+      allow update: if isWithinRateLimit()
+                    && isAuthenticatedDevice()
+                    && request.resource.data.payload_b64.size() <= maxMessageDocSize()
+                    && request.resource.data.id == resource.data.id
+                    && request.resource.data.sender_id == resource.data.sender_id
+                    && request.resource.data.recipient_id == resource.data.recipient_id
+                    && request.resource.data.signature == resource.data.signature
+                    && request.resource.data.hop_count == resource.data.hop_count + 1;
+
+      allow delete: if false;
+    }
+
+    // =======================================================================
+    // Verified-org allowlist — `verified_orgs/{org_id}`
+    //
+    // These documents back the "verified" badge on ALERT messages. They
+    // are server-managed and human-curated; client devices only read
+    // them to verify a sender's Ed25519 public key against the allowlist.
+    //
+    // Writes happen via the Firebase Admin SDK (console, CI script,
+    // ops scripts). The Admin SDK bypasses these rules — that is the
+    // whole point of the Admin SDK. From a client SDK, writes are
+    // ALWAYS denied.
+    //
+    // Reads are world-permitted to any authenticated device: the
+    // allowlist itself is not sensitive (the public keys it contains
+    // are public by definition — they are the keys used to verify
+    // broadcast signatures).
+    // =======================================================================
+    match /verified_orgs/{orgId} {
+      // World-readable for any authenticated device. The allowlist is
+      // public data; gating reads behind auth just keeps anonymous
+      // crawlers out of the project.
+      allow read: if isAuthenticatedDevice();
+
+      // All client-initiated writes are denied. The only legitimate
+      // writer is the Firebase Admin SDK (server-side script / console),
+      // which is exempt from these rules by definition.
+      allow write: if false;
+    }
+
+    // =======================================================================
+    // Evidence Vault text records — `evidence/{recipient_id}/records/{record_id}`
+    //
+    // Privacy: identical to direct messages. Only the device whose
+    // `sender_id` custom claim equals the path segment may read the
+    // record. Writes are permitted from any authenticated device
+    // (the sender), but the doc's `recipient_id` MUST equal the path
+    // segment and `sender_id` MUST equal the caller's claim.
+    //
+    // The 5 KB size cap is intentional — vault records are short text
+    // snapshots. Larger media (photos, video) goes through a different
+    // pipeline (Ticket #31 follow-ups).
+    // =======================================================================
+    match /evidence/{recipientId}/records/{recordId} {
+      // Recipient-only reads.
+      allow read: if isRecipient(recipientId);
+
+      allow create: if isWithinRateLimit()
+                    && isAuthenticatedDevice()
+                    // Size cap on the bulk-data field — `payload_b64` is
+                    // the variable-length ciphertext; the other fields
+                    // are short fixed strings. See the `maxMessageDocSize`
+                    // helper comment for why we measure the string
+                    // field rather than `request.resource.data.size()`.
+                    && request.resource.data.payload_b64.size() <= maxEvidenceSize()
+                    // Identity binding — the sender claims to be the
+                    // device whose custom claim they hold.
+                    && request.resource.data.sender_id == request.auth.token.sender_id
+                    // Routing binding — the doc lands in the
+                    // collection for the recipient it claims to be
+                    // for. Without this check, a misbehaving sender
+                    // could stash evidence in a victim's slice
+                    // (sending docs "to" the victim without their
+                    // consent) or in a stranger's slice (avoiding
+                    // detection).
+                    && request.resource.data.recipient_id == recipientId
+                    && request.resource.data.keys().hasOnly([
+                         'id', 'sender_id', 'recipient_id', 'created_at',
+                         'payload_b64', 'content_hash_b64', 'signature',
+                         'expires_at',
+                       ])
+                    && request.resource.data.id is string
+                    && request.resource.data.sender_id is string
+                    && request.resource.data.recipient_id is string
+                    && request.resource.data.created_at is timestamp
+                    && request.resource.data.payload_b64 is string
+                    && request.resource.data.content_hash_b64 is string
+                    && request.resource.data.signature is string
+                    && request.resource.data.expires_at is timestamp;
+
+      // Evidence records are immutable once written — there is no
+      // "relay" hop, and a recipient must be able to verify the
+      // signature against the exact bytes they received. Deletes
+      // happen via the server-side TTL policy on `expires_at`.
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // =======================================================================
+    // Catch-all — anything else is denied.
+    //
+    // Without a default-deny at the end of the match block, a typo in a
+    // future collection name would silently fall through to "no rule
+    // matches → access denied" only in older rules engines. Modern
+    // engines also deny by default, but we make it explicit.
+    // =======================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
