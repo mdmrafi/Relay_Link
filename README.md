@@ -22,6 +22,26 @@ dependencies. After that, incremental debug builds are fast.
 > Per `HANDOFF.md` the final demo still requires **two physical Android
 > devices** for the mesh-relay walkthrough.
 
+## ALERT verification: demo allowlist
+
+Verified-badged ALERT messages (per `SPEC.md` §12) are signed by organisations
+whose Ed25519 public keys ship in this repository at
+`assets/verified_orgs.json`, loaded at runtime by
+`lib/allowlist/verified_orgs.dart`.
+
+**The `verified_orgs` allowlist in this repo is a manually curated demo
+allowlist, not a production trust authority.** Specifically:
+
+- Every entry is flagged `"demo": true` in the JSON and the loader refuses
+  to parse a non-demo entry, so this code path cannot silently promote a real
+  organisation to verified status.
+- The seed script (`tools/seed_orgs.dart`) regenerates fresh Ed25519 keys on
+  every run. The private seeds are printed to stdout for demo use only and
+  MUST NOT be checked in or used outside the demo.
+- A production deployment would need a vetted registry of public keys, regular
+  rotation, an out-of-band revocation channel, and a trust anchor not derived
+  from this repository. None of that is in scope here.
+
 ## Gateway mode toggle
 
 A Settings tile **"Act as gateway for nearby devices"** lets the user opt

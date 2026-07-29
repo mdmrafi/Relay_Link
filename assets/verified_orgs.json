@@ -1,0 +1,23 @@
+[
+  {
+    "org_id": "demo_red_crescent",
+    "name": "Demo Red Crescent Branch",
+    "public_key": "4tSoBcIYkxj6MgyPTp5WHu37liMhqaJEgUSZRbneZQw=",
+    "added_at": "2026-07-29T21:15:29.013142Z",
+    "demo": true
+  },
+  {
+    "org_id": "demo_community_net",
+    "name": "Demo Community Mesh Network",
+    "public_key": "MeEYMKF3hOu3Ud/skz//EHckjeDxdrGw77PL7D15UOg=",
+    "added_at": "2026-07-29T21:15:29.013142Z",
+    "demo": true
+  },
+  {
+    "org_id": "demo_climate_watch",
+    "name": "Demo Climate Watch Coalition",
+    "public_key": "3F2Bo3PEVujBmkkdguitdNVNy+TSS+UWbAOe317jABg=",
+    "added_at": "2026-07-29T21:15:29.013142Z",
+    "demo": true
+  }
+]
