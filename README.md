@@ -5,6 +5,16 @@ SMS/internet relay, and a text-only Evidence Vault. See `SPEC.md` for the
 product spec, `STRESS-TEST.md` for the cut list and decision log, and
 `.scratch/relaylink-build/issues/` for the ticket breakdown.
 
+## Crypto notes
+
+* **DIRECT messages (ticket #13)** use an HKDF-chain fallback rather than a
+  full Double Ratchet. This is per the binding D5 verdict in `VERDICT.md`:
+  every published Dart Signal Protocol package requires X3DH and there is no
+  externally-bootstrappable ratchet available. The HKDF chain gives forward
+  secrecy across the chain (compromise of one message key cannot recover
+  earlier ones) but does NOT give post-compromise secrecy. For a production
+  deployment a full Double Ratchet would be required.
+
 ## Building
 
 ```bash
