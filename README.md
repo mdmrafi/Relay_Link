@@ -82,6 +82,45 @@ See `lib/features/gateway/toggle.dart` for the implementation and
 tests covering the tap-when-off flow, tap-when-on flow, persistence across
 restart, and verbatim spec-text matching).
 
+## SMS transport: cost and volume disclosure
+
+The optional SMS transport layer (`lib/sms/transport.dart`) lets RelayLink
+fan out messages to known contacts over the device's SMS service when
+cell signal is available. The implementation honors the **fan-out,
+one-payload-per-recipient** model from `SPEC.md` §9: every BROADCAST
+message is sent *as the same encrypted payload* to each contact, on the
+carrier network. Per-recipient per-message SMS volume therefore scales
+as `O(contacts × messages)`.
+
+**Cost and volume risks users should know about:**
+
+- **Carrier cost.** Every segment counts against the user's SMS plan.
+  A 1 KB encrypted BROADCAST to 10 contacts is roughly 7 segments × 10
+  contacts = 70 SMS messages on the user's bill. The fragmentation size
+  (default 140 chars/segment) is conservative — actual cost depends on
+  the carrier's billing policy for multi-segment SMS.
+- **Recipient consent.** Recipients see each fragment as a regular SMS
+  from the sender's phone number. There is no per-message opt-in prompt
+  on the recipient side; the sender is trusted to have prior
+  arrangement with their contacts. **Do not use this transport to
+  message people who haven't agreed to receive RelayLink traffic.**
+- **International rates.** Sending to contacts abroad triggers
+  international SMS rates that can be an order of magnitude higher
+  than domestic. The transport does not filter by country code; the
+  user owns that gate.
+- **Carrier metadata.** SMS plaintext (the RL: framing header) is
+  visible to the carrier. The header leaks the message id and
+  idx/total but not the payload. See `SPEC.md` §9 for the threat
+  model.
+
+The transport itself (`SmsTransport.send`) refuses to send if no
+phone number is on file for the recipient (`ContactsStore.phoneFor`
+returns null), so accidental fan-out to no-one is impossible. But
+**anything you put in the contacts store will be SMSed at full carrier
+cost when a BROADCAST is sent**, and the README does not know what's
+in your local contacts list. Users should keep the contact list small
+and audit it regularly.
+
 ## Firebase setup
 
 The repository ships with a **placeholder** `lib/firebase_options.dart`
