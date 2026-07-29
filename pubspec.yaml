@@ -1,0 +1,69 @@
+name: relaylink
+description: "RelayLink — offline-first mesh messaging with end-to-end encryption, optional SMS/internet relay, and a text-only Evidence Vault."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Crypto primitives (X25519, Ed25519, AES-256-GCM, HKDF) — used by tickets
+  # #02 (device identity), #03 (BROADCAST crypto), #13 (DIRECT crypto / ratchet),
+  # #15 (channel keys), #31 (vault at-rest), #44 (demo).
+  # The spec forbids hand-rolling primitives — always go through this package.
+  cryptography: ^2.9.0
+
+  # State management — used by tickets #38-#42 (UI flows for messaging, vault,
+  # gateway toggle, allowlist).
+  flutter_riverpod: ^2.6.1
+
+  # Local SQL store — messages, seen-cache, vault entries, contacts.
+  # Used by #05 (helpers), #09 (mesh relay seen cache), #31 (vault), #40 (search).
+  sqflite: ^2.4.3
+
+  # Secure storage for identity keys, channel keys, secrets.
+  # Used by #02 (Ed25519 + X25519 keypairs), #05 (helpers), #15 (channel keys).
+  flutter_secure_storage: ^10.3.1
+
+  # Message IDs (UUIDv4) — used by #04 (message schema).
+  uuid: ^4.6.0
+
+  # QR encode (channel invites) — used by #16 (channel QR exchange).
+  qr_flutter: ^4.1.0
+
+  # QR decode — used by #16 (channel QR exchange). Note: real device camera
+  # required for live use; emulator returns no detections on fake feeds.
+  mobile_scanner: ^7.4.0
+
+  # Lightweight key/value prefs — gateway toggle, first-launch flag,
+  # allowlist cache. Used by #21 (gateway toggle), #30 (first-launch),
+  # #36 (allowlist).
+  shared_preferences: ^2.5.5
+
+  # Firebase init — used by #18 (firestore stub). All Firebase packages must
+  # share the same FlutterFire release lineage.
+  firebase_core: ^4.12.1
+
+  # Relay collections, allowlist — used by #18 (stub), #20 (direct internet
+  # messaging), #22 (gateway relay), #35 (allowlist source), #36 (allowlist
+  # enforcement).
+  cloud_firestore: ^6.7.1
+
+  # Evidence Vault uploads (text-only files) — used by #18 (firestore stub),
+  # #31 (vault writes).
+  firebase_storage: ^13.4.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
