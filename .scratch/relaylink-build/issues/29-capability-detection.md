@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] All 9 features from §3.1 table have a detection result
-- [ ] iOS-specific reasons are accurate and helpful
-- [ ] Android: SMS features true; iOS: SMS features false with reason
-- [ ] Feature phones (no app): N/A — handled in README + SMS auto-reply text, not in app UI
-- [ ] Tests: simulated Android and iOS DeviceCapabilities match expected values
+- [x] All 9 features from §3.1 table have a detection result
+- [x] iOS-specific reasons are accurate and helpful
+- [x] Android: SMS features true; iOS: SMS features false with reason
+- [x] Feature phones (no app): N/A — handled in README + SMS auto-reply text, not in app UI
+- [x] Tests: simulated Android and iOS DeviceCapabilities match expected values
