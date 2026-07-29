@@ -5,7 +5,14 @@
 
 import 'package:flutter/material.dart';
 
-void main() {
+import 'channels/keys.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Ticket #15: ensure the public channel key is registered before any
+  // broadcast crypto (#03) runs. Safe to call repeatedly.
+  final keyStore = await ChannelKeyStore.instance();
+  await keyStore.init();
   runApp(const RelayLinkApp());
 }
 
