@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Single-segment "messages" complete immediately on arrival
-- [ ] Multi-segment messages buffer correctly, emit when total reached
-- [ ] Duplicate segments (same msgid+idx) are deduped silently
-- [ ] After 10 minutes of inactivity on a msgid, the buffer entry is discarded with a log line
-- [ ] Test: feed 5 segments with one duplicate, one out-of-order, confirm correct reassembly
-- [ ] Test: feed 3 of 7 segments, wait 11 minutes, confirm buffer is cleaned and no output emitted
+- [x] Single-segment "messages" complete immediately on arrival
+- [x] Multi-segment messages buffer correctly, emit when total reached
+- [x] Duplicate segments (same msgid+idx) are deduped silently
+- [x] After 10 minutes of inactivity on a msgid, the buffer entry is discarded with a log line
+- [x] Test: feed 5 segments with one duplicate, one out-of-order, confirm correct reassembly
+- [x] Test: feed 3 of 7 segments, wait 11 minutes, confirm buffer is cleaned and no output emitted
