@@ -6,10 +6,10 @@
 
 **Status:** ready-for-agent
 
-- [ ] First launch detects "no identity" and generates a new Ed25519 + X25519 keypair
-- [ ] Private keys stored via flutter_secure_storage (Keystore-backed on Android)
-- [ ] Subsequent launches load existing identity, never regenerates
-- [ ] `sign(bytes)` produces a signature, `verify(bytes, sig, pubkey)` returns bool
-- [ ] `ecdh(theirPublicKey)` returns a 32-byte shared secret
-- [ ] Unit tests: round-trip sign/verify, ecdh symmetry (A.ecdh(B) == B.ecdh(A))
-- [ ] `SenderId` is derived deterministically from the Ed25519 public key
+- [x] First launch detects "no identity" and generates a new Ed25519 + X25519 keypair
+- [x] Private keys stored via flutter_secure_storage (Keystore-backed on Android)
+- [x] Subsequent launches load existing identity, never regenerates
+- [x] `sign(bytes)` produces a signature, `verify(bytes, sig, pubkey)` returns bool
+- [x] `ecdh(theirPublicKey)` returns a 32-byte shared secret
+- [x] Unit tests: round-trip sign/verify, ecdh symmetry (A.ecdh(B) == B.ecdh(A))
+- [x] `SenderId` is derived deterministically from the Ed25519 public key
