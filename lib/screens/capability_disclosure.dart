@@ -73,16 +73,26 @@ class _CapabilityRow extends StatelessWidget {
     final reason = capability.reason;
     final iconColor =
         available ? const Color(0xFF66BB6A) : const Color(0xFFEF5350);
-    return ListTile(
-      key: ValueKey<String>('capabilityRow::$label'),
-      leading: Icon(
-        available ? Icons.check_circle : Icons.cancel,
-        color: iconColor,
-      ),
-      title: Text(label),
-      subtitle: Text(
-        available ? 'available' : reason,
-        key: ValueKey<String>('capabilityRowReason::$label'),
+    // The icon already conveys ✓/✗ visually; the Semantics label spells
+    // that out for screen readers and adds the reason / "available"
+    // suffix so the row is self-contained when announced out of context.
+    final semanticsLabel = available
+        ? '$label, available'
+        : '$label, unavailable: $reason';
+    return Semantics(
+      label: semanticsLabel,
+      liveRegion: true,
+      child: ListTile(
+        key: ValueKey<String>('capabilityRow::$label'),
+        leading: Icon(
+          available ? Icons.check_circle : Icons.cancel,
+          color: iconColor,
+        ),
+        title: Text(label),
+        subtitle: Text(
+          available ? 'available' : reason,
+          key: ValueKey<String>('capabilityRowReason::$label'),
+        ),
       ),
     );
   }
@@ -126,7 +136,11 @@ class CapabilityDisclosurePage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("This device's capabilities"),
+        title: Semantics(
+          header: true,
+          label: "This device's capabilities",
+          child: const Text("This device's capabilities"),
+        ),
       ),
       body: SafeArea(
         child: Column(
@@ -137,28 +151,37 @@ class CapabilityDisclosurePage extends StatelessWidget {
                   children: <Widget>[
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                      child: Text(
-                        'Platform: ${capabilities.platform}',
-                        key: const ValueKey<String>('capabilityPlatform'),
-                        style: Theme.of(context).textTheme.titleMedium,
+                      child: Semantics(
+                        label: 'Device platform: ${capabilities.platform}',
+                        header: true,
+                        child: Text(
+                          'Platform: ${capabilities.platform}',
+                          key: const ValueKey<String>('capabilityPlatform'),
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
                       ),
                     ),
                     if (_showIosBanner)
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                        child: Container(
-                          key: const ValueKey<String>('iosDisclosureBanner'),
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1F2933),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: const Color(0xFF4FC3F7),
+                        child: Semantics(
+                          label:
+                              'Important iOS notice. $kIosDisclosureVerbatim',
+                          liveRegion: true,
+                          child: Container(
+                            key: const ValueKey<String>('iosDisclosureBanner'),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1F2933),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: const Color(0xFF4FC3F7),
+                              ),
                             ),
-                          ),
-                          child: Text(
-                            kIosDisclosureVerbatim,
-                            style: const TextStyle(fontSize: 14),
+                            child: Text(
+                              kIosDisclosureVerbatim,
+                              style: const TextStyle(fontSize: 14),
+                            ),
                           ),
                         ),
                       ),
@@ -208,18 +231,30 @@ class CapabilityDisclosurePage extends StatelessWidget {
               padding: const EdgeInsets.all(16),
               child: SizedBox(
                 width: double.infinity,
-                child: FilledButton(
-                  key: const ValueKey<String>('capabilityConfirmButton'),
-                  onPressed: () async {
-                    final navigator = Navigator.of(context);
-                    if (mode == CapabilityDisclosureMode.firstLaunch) {
-                      await markCapabilityDisclosureSeen();
-                    }
-                    if (navigator.canPop()) {
-                      navigator.pop();
-                    }
-                  },
-                  child: Text(_confirmLabel),
+                child: Semantics(
+                  // Confirm-dismiss button — first-launch dismisses the
+                  // gate and persists the seen flag; Settings/About pops
+                  // back. The hint tells screen-reader users what the
+                  // action will do beyond the visible label.
+                  label: mode == CapabilityDisclosureMode.firstLaunch
+                      ? '$_confirmLabel, dismiss capability disclosure'
+                      : '$_confirmLabel, return to settings',
+                  button: true,
+                  enabled: true,
+                  excludeSemantics: true,
+                  child: FilledButton(
+                    key: const ValueKey<String>('capabilityConfirmButton'),
+                    onPressed: () async {
+                      final navigator = Navigator.of(context);
+                      if (mode == CapabilityDisclosureMode.firstLaunch) {
+                        await markCapabilityDisclosureSeen();
+                      }
+                      if (navigator.canPop()) {
+                        navigator.pop();
+                      }
+                    },
+                    child: Text(_confirmLabel),
+                  ),
                 ),
               ),
             ),
