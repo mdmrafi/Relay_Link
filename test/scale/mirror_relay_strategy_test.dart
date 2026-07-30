@@ -84,7 +84,6 @@ void main() {
         expect(received.first.id, msg.id);
 
         // Second delivery of the same id: seen-cache hit → null, no broadcast.
-        strategy.duplicateDropCount; // sanity: counter accessor exists for future use
         final receivedAfterDup = <Message>[];
         final sub2 = tB.incoming.listen(receivedAfterDup.add);
         final second = strategy.onIncoming(

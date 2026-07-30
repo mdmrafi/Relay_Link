@@ -3,16 +3,10 @@
 // This file spawns N in-process "device peers", each with its own
 // LoopbackTransport (Transport contract) and a BloomFilter-based seen-
 // cache. A small in-test relay layer mirrors the production mesh relay:
-// it listens to `incoming`, dedupes via the seen-cache, decrements TTL,
-// and re-broadcasts via the in-process `LoopbackMeshDiscovery`.
-//
-// `peer_error_isolation_test.dart` is a sibling test file that
-// exercises the same per-peer try/catch semantic via its own minimal
-// peer fixture (it cannot import the production `_Peer` directly
-// because that class is library-private). The harness scenarios
-// below assert the production try/catch indirectly by running every
-// message through the real `_Peer._onIncoming` and asserting
-// `peerErrorCount == 0`.
+// it listens on `incoming`, dedupes via the seen-cache, decrements TTL,
+// and re-broadcasts via the in-process `LoopbackMeshDiscovery`. The
+// relay decision is delegated to a `RelayStrategy` (tickets #48; spec
+// §2) — `MirrorRelayStrategy` is the in-process implementation.
 //
 // WHAT IT MEASURES
 //
@@ -634,12 +628,19 @@ class _Harness {
   /// [MirrorRelayStrategy] against the harness's own discovery.
   final RelayStrategy Function(LoopbackMeshDiscovery discovery) _strategyFactory;
 
+  /// The single strategy instance shared across all peers, created
+  /// during [bootstrap]. Scenario methods route originate calls
+  /// through this so the harness exercises the [RelayStrategy]
+  /// contract end-to-end (per spec §2 — a future `MeshRelayStrategy`
+  /// will implement the same interface without touching the scenarios).
+  late final RelayStrategy strategy;
+
   /// Build peers and wire them into the discovery layer. Each peer gets
   /// a fresh BloomFilter, a per-peer LoopbackTransport, and the
   /// discovery's broadcast path is configured to deliver into the
   /// peer's transport.
   Future<void> bootstrap() async {
-    final strategy = _strategyFactory(discovery);
+    strategy = _strategyFactory(discovery);
     for (var i = 0; i < peerCount; i++) {
       final id = 'peer-${i.toString().padLeft(3, '0')}';
       // TTL = log2(N) + 1 so the broadcast storm finishes in a bounded
@@ -735,7 +736,7 @@ class _Harness {
         now: now,
       );
       sentTimes[msg.id] = now;
-      discovery.broadcast(senderId: origin.peerId, msg: msg);
+      strategy.originate(senderId: origin.peerId, msg: msg);
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
 
@@ -871,7 +872,7 @@ class _Harness {
           now: now,
         );
         sentTimes[msg.id] = now;
-        discovery.broadcast(senderId: origin.peerId, msg: msg);
+        strategy.originate(senderId: origin.peerId, msg: msg);
       } else {
         final sender = peers[sIdx];
         var rIdx = _rng.nextInt(peers.length);
@@ -953,7 +954,7 @@ class _Harness {
         now: now,
       );
       sentTimes[msg.id] = now;
-      discovery.broadcast(senderId: origin.peerId, msg: msg);
+      strategy.originate(senderId: origin.peerId, msg: msg);
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
 
@@ -1230,10 +1231,6 @@ void main() {
     print('scale harness bloom FPR (n=2000, q=1000): '
         '${(fpr * 100).toStringAsFixed(3)}%');
   });
-
-  // Peer-error isolation test is mounted via its own file —
-  // `peer_error_isolation_test.dart` — which imports this library
-  // and adds its own `test()` blocks.
 
   // Peer strategy wiring (Ticket #48 / spec §2).
   //

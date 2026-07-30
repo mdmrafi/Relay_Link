@@ -23,14 +23,6 @@ class MirrorRelayStrategy implements RelayStrategy {
 
   final LoopbackMeshDiscovery _discovery;
 
-  /// Total duplicates suppressed (seen-cache hit). Surfaced for
-  /// unit-test observability; not consumed by the harness today.
-  int duplicateDropCount = 0;
-
-  /// Total messages dropped because TTL hit zero. Surfaced for
-  /// unit-test observability; not consumed by the harness today.
-  int ttlDropCount = 0;
-
   @override
   Message? onIncoming({
     required String peerId,
@@ -38,12 +30,10 @@ class MirrorRelayStrategy implements RelayStrategy {
     required BloomFilter seenCache,
   }) {
     if (seenCache.mightContain(msg.id)) {
-      duplicateDropCount++;
       return null;
     }
     seenCache.insert(msg.id);
     if (msg.ttl <= 0) {
-      ttlDropCount++;
       return null;
     }
     final decremented = msg.copyWith(
