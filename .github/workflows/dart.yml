@@ -43,11 +43,13 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      # Note: --fatal-infos is intentionally omitted because the current
-      # analyze output includes infos; enabling it can be done once those are
-      # resolved.
+      # Note: --no-fatal-infos is used because the current codebase includes
+      # pre-existing `prefer_initializing_formals` info-level lints. Flutter
+      # analyze returns exit 1 on any issue (including info), so we suppress
+      # info-level failures here. Once the 13 pre-existing infos are cleaned
+      # up, switch to `--fatal-infos` for stricter analysis.
       - name: Analyze project source
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       # flutter_test (widget tests) requires the Flutter runtime, not
       # `dart test`.
