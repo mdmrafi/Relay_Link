@@ -111,14 +111,17 @@ SmsTransport.incoming  ───────► TransportManager ─────
 | Mode       | Algorithm                 | Key derivation                          | Notes                                                                                  |
 |------------|---------------------------|-----------------------------------------|----------------------------------------------------------------------------------------|
 | BROADCAST  | AES-256-GCM (per channel) | Out-of-band channel-key sharing (QR)    | Same ciphertext to every recipient; the channel key is the symmetric secret.           |
-| DIRECT     | HKDF-chain (HKDF-SHA256)  | ECDH(X25519) shared secret              | Each direction has its own root; per-message key is discarded after use.               |
+| DIRECT     | Double Ratchet (X25519 DH + symmetric HKDF chain + skipped-key storage capped at 1000) | ECDH(X25519) shared secret at QR exchange | DH ratchet re-seeds the chain on every round-trip → post-compromise security. HKDF-chain-only fallback preserved at `lib/crypto/direct.dart`. |
 | Vault (at rest) | AES-256-GCM          | Vault-wrapping key derived from device identity | Per-record key wrapped with vault-wrapping key wrapped with device-identity key. |
 
 The `libsignal_protocol_dart` package was rejected (D5 verdict) — see
 [`VERDICT.md`](.scratch/relaylink-build/issues/12-libsignal-verdict.md)
-for the full reasoning. The HKDF-chain in `lib/crypto/direct.dart` is a
-deliberately simple, transparent fallback: no Double Ratchet, no X3DH,
-but forward secrecy by way of per-message key derivation and discard.
+for the full reasoning. After the verdict, ticket #13 (`cutrev-ratchet`)
+implemented the full Double Ratchet from scratch in pure Dart on top of
+the same `cryptography` package primitives. The HKDF-chain in
+`lib/crypto/direct.dart` is the binding-fallback path that *would have
+shipped* if `cutrev-ratchet` had not landed; it is preserved for
+backwards reference and is exercised by the `forward_secrecy_demo` tool.
 
 ## Storage
 
