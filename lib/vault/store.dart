@@ -102,6 +102,12 @@ class VaultRecord {
   /// self-encrypted captures.
   final String? recipientId;
 
+  /// Lifecycle status. Known values:
+  ///   * `pending` — ready to upload on next connectivity window (the
+  ///     store's default for new captures).
+  ///   * `draft`, `delivered`, `failed` — future states (Tickets #34 / #38).
+  final String status;
+
   const VaultRecord({
     required this.id,
     required this.ciphertext,
@@ -110,6 +116,7 @@ class VaultRecord {
     required this.aad,
     required this.createdAt,
     required this.recipientId,
+    this.status = 'pending',
   });
 
   /// Convert to a SQLite-friendly map. Byte fields are stored as `BLOB`.
@@ -121,7 +128,7 @@ class VaultRecord {
         'aad': aad,
         'created_at': createdAt,
         'recipient_id': recipientId,
-        'status': 'pending',
+        'status': status,
       };
 
   /// Decode from a SQLite row. Mirrors [toRow].
@@ -136,6 +143,7 @@ class VaultRecord {
     }
 
     final recipient = row['recipient_id'] as String?;
+    final status = (row['status'] as String?) ?? 'pending';
     return VaultRecord(
       id: row['id']! as String,
       ciphertext: bytes('ciphertext'),
@@ -144,13 +152,14 @@ class VaultRecord {
       aad: bytes('aad'),
       createdAt: (row['created_at']! as num).toInt(),
       recipientId: (recipient == null || recipient.isEmpty) ? null : recipient,
+      status: status,
     );
   }
 
   @override
   String toString() =>
       'VaultRecord(id=$id, recipient=${recipientId ?? 'self'}, '
-      'ct=${ciphertext.length}B, createdAt=$createdAt)';
+      'status=$status, ct=${ciphertext.length}B, createdAt=$createdAt)';
 }
 
 /// Evidence Vault persistent store.
@@ -193,6 +202,12 @@ class VaultStore {
     await store._loadOrCreateVwk();
     return store;
   }
+
+  /// The underlying [LocalDb] handle. Exposed for the UI delete seam
+  /// (#32) so the screen can route deletes through the same DB the
+  /// store writes to. Production code that uses [VaultStore.capture] /
+  /// [VaultStore.decrypt] / [VaultStore.list] doesn't need this.
+  LocalDb get db => _db;
 
   /// Encrypt [text] for optional [recipientId] and persist it.
   ///
@@ -264,6 +279,17 @@ class VaultStore {
     );
     if (rows.isEmpty) return null;
     return VaultRecord.fromRow(rows.first);
+  }
+
+  /// Delete the vault record with the given [id]. Returns `true` if a
+  /// row was removed, `false` if no such record existed. Idempotent.
+  ///
+  /// Added by Ticket #32 to support the UI's delete affordance. The
+  /// wrapped per-record key is discarded along with the ciphertext —
+  /// there is no key escrow to recover from.
+  Future<bool> delete(String id) async {
+    final removed = await _db.deleteVaultRecord(id);
+    return removed > 0;
   }
 
   /// Release cached material. Safe to call multiple times.
