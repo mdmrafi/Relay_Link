@@ -6,6 +6,14 @@
 // it listens to `incoming`, dedupes via the seen-cache, decrements TTL,
 // and re-broadcasts via the in-process `LoopbackMeshDiscovery`.
 //
+// `peer_error_isolation_test.dart` is a sibling test file that
+// exercises the same per-peer try/catch semantic via its own minimal
+// peer fixture (it cannot import the production `_Peer` directly
+// because that class is library-private). The harness scenarios
+// below assert the production try/catch indirectly by running every
+// message through the real `_Peer._onIncoming` and asserting
+// `peerErrorCount == 0`.
+//
 // WHAT IT MEASURES
 //
 //   * Message propagation latency — P50 / P95 / P99 from send to "all
@@ -50,6 +58,8 @@ import 'package:relaylink/models/message.dart';
 import 'package:relaylink/transport/transport.dart';
 
 import 'loopback_mesh_discovery.dart';
+import 'mirror_relay_strategy.dart';
+import 'relay_strategy.dart';
 
 /// Rough average of payload bytes + JSON envelope overhead (keys, base64,
 /// timestamps, IDs). Used for `bytesPerPeerThroughput` so we don't have to
@@ -148,6 +158,7 @@ class _Peer {
     required this.bloom,
     required this.discovery,
     required this.ttl,
+    required this.strategy,
   });
 
   final String peerId;
@@ -157,6 +168,12 @@ class _Peer {
 
   /// Default TTL for messages this peer ORIGINATES.
   final int ttl;
+
+  /// Relay decision-maker. The peer delegates to this for dedup,
+  /// TTL decrement, hop-count increment, and re-broadcast. The peer
+  /// owns the [BloomFilter] and counter state; the strategy consumes
+  /// the bloom via `onIncoming` and emits the relay decision.
+  final RelayStrategy strategy;
 
   StreamSubscription<Message>? _sub;
 
@@ -180,6 +197,11 @@ class _Peer {
   /// Total seen-cache queries (mightContain calls).
   int seenChecks = 0;
 
+  /// Total errors caught while routing an incoming message through
+  /// [strategy] (Ticket #48 / spec §4). Counted but never re-thrown
+  /// so a single bad peer cannot cascade into tearing the harness down.
+  int peerErrorCount = 0;
+
   /// Stop the relay. Idempotent.
   Future<void> stop() async {
     await _sub?.cancel();
@@ -195,24 +217,28 @@ class _Peer {
   void _onIncoming(Message raw) {
     receivedCount++;
     seenChecks++;
-    // Seen-cache dedup.
-    if (bloom.mightContain(raw.id)) {
-      duplicateDropCount++;
-      return;
+    // Snapshot the bloom BEFORE the strategy runs so we can classify
+    // the post-call `null` as either dedup or TTL drop without
+    // consulting the strategy's private counters.
+    final wasSeen = bloom.mightContain(raw.id);
+    try {
+      final result = strategy.onIncoming(
+        peerId: peerId,
+        msg: raw,
+        seenCache: bloom,
+      );
+      if (result == null) {
+        if (wasSeen) {
+          duplicateDropCount++;
+        } else {
+          ttlDropCount++;
+        }
+      } else {
+        relayedCount++;
+      }
+    } catch (_) {
+      peerErrorCount++;
     }
-    bloom.insert(raw.id);
-    // TTL decrement — drop messages that have no hops left.
-    if (raw.ttl <= 0) {
-      ttlDropCount++;
-      return;
-    }
-    final decremented = raw.copyWith(
-      ttl: raw.ttl - 1,
-      hopCount: raw.hopCount + 1,
-    );
-    // Re-broadcast to all OTHER peers via the discovery layer.
-    discovery.broadcast(senderId: peerId, msg: decremented);
-    relayedCount++;
   }
 
   /// Originate a fresh broadcast message. The caller is responsible for
@@ -588,10 +614,13 @@ class _Harness {
     required this.messageCount,
     required Duration deliveryLatency,
     required Duration jitter,
+    RelayStrategy Function(LoopbackMeshDiscovery discovery)? strategyFactory,
   })  : discovery = LoopbackMeshDiscovery(
           deliveryLatency: deliveryLatency,
           jitter: jitter,
-        );
+        ),
+        _strategyFactory = strategyFactory ??
+            ((d) => MirrorRelayStrategy(discovery: d));
 
   final int peerCount;
   final int messageCount;
@@ -599,11 +628,18 @@ class _Harness {
   final List<_Peer> peers = <_Peer>[];
   late final math.Random _rng = math.Random(0xC0FFEE ^ peerCount);
 
+  /// Factory for the single strategy shared across all peers in this
+  /// harness. The strategy is created once during [bootstrap] and
+  /// passed into every peer's constructor. Defaults to
+  /// [MirrorRelayStrategy] against the harness's own discovery.
+  final RelayStrategy Function(LoopbackMeshDiscovery discovery) _strategyFactory;
+
   /// Build peers and wire them into the discovery layer. Each peer gets
   /// a fresh BloomFilter, a per-peer LoopbackTransport, and the
   /// discovery's broadcast path is configured to deliver into the
   /// peer's transport.
   Future<void> bootstrap() async {
+    final strategy = _strategyFactory(discovery);
     for (var i = 0; i < peerCount; i++) {
       final id = 'peer-${i.toString().padLeft(3, '0')}';
       // TTL = log2(N) + 1 so the broadcast storm finishes in a bounded
@@ -618,6 +654,7 @@ class _Harness {
         bloom: bloom,
         discovery: discovery,
         ttl: ttl,
+        strategy: strategy,
       );
 
       // Wire the peer: incoming from the discovery layer feeds the
@@ -974,12 +1011,14 @@ class _Harness {
     var totalTtlDrops = 0;
     var totalRelayed = 0;
     var totalBloomInserts = 0;
+    var totalPeerErrors = 0;
     for (final p in peers) {
       totalSeenChecks += p.seenChecks;
       totalDuplicates += p.duplicateDropCount;
       totalTtlDrops += p.ttlDropCount;
       totalRelayed += p.relayedCount;
       totalBloomInserts += p.bloom.estimateCount();
+      totalPeerErrors += p.peerErrorCount;
     }
     final hitRate =
         totalSeenChecks == 0 ? 0.0 : totalDuplicates / totalSeenChecks;
@@ -1049,9 +1088,9 @@ class _Harness {
           : (totalRelayed / peerCount) /
               (wallClock.inMicroseconds / 1000000.0),
       messagesLost: messagesLost,
-      // No try/catch around peer._onIncoming today, so this stays 0. Hook
-      // point reserved for when per-peer errors are counted.
-      peerErrorCount: 0,
+      // Sum of per-peer relay errors caught by the try/catch around
+      // `strategy.onIncoming` (Ticket #48 / spec §4).
+      peerErrorCount: totalPeerErrors,
       perPeerRelayedCounts: perPeer,
       peerRelayedMin: peerRelayedMin,
       peerRelayedMax: peerRelayedMax,
@@ -1191,6 +1230,225 @@ void main() {
     print('scale harness bloom FPR (n=2000, q=1000): '
         '${(fpr * 100).toStringAsFixed(3)}%');
   });
+
+  // Peer-error isolation test is mounted via its own file —
+  // `peer_error_isolation_test.dart` — which imports this library
+  // and adds its own `test()` blocks.
+
+  // Peer strategy wiring (Ticket #48 / spec §2).
+  //
+  // Asserts that `_Peer.start()` subscribes `transport.incoming` to
+  // `strategy.onIncoming`. Demonstrates that the peer delegates the
+  // relay decision to the injected strategy — not to an inline
+  // bloom/TTL/hardcoded broadcaster.
+  group('_Peer delegates relay to RelayStrategy', () {
+    test(
+      '_Peer.start() subscribes transport.incoming → strategy.onIncoming '
+      'exactly once per emitted message',
+      () async {
+        final discovery = LoopbackMeshDiscovery(
+          deliveryLatency: Duration.zero,
+          jitter: Duration.zero,
+        );
+        final transport = LoopbackTransport(name: 'wire-peer');
+        final bloom = BloomFilter.empty();
+        final fakeStrategy = _RecordingRelayStrategy();
+
+        final peer = _Peer(
+          peerId: 'wire-peer',
+          transport: transport,
+          bloom: bloom,
+          discovery: discovery,
+          ttl: 3,
+          strategy: fakeStrategy,
+        );
+        peer.start();
+
+        final msg = Message.create(
+          mode: MessageMode.broadcast,
+          type: MessageType.chat,
+          channelId: 'public',
+          senderId: 'external',
+          payload: Uint8List(0),
+          ttl: 3,
+        );
+        await transport.send(msg);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(fakeStrategy.onIncomingCalls, 1,
+            reason: 'strategy.onIncoming must be invoked exactly once '
+                'per message the peer receives');
+        expect(fakeStrategy.lastPeerId, 'wire-peer');
+        expect(fakeStrategy.lastMsg?.id, msg.id);
+        expect(identical(fakeStrategy.lastSeenCache, bloom), isTrue,
+            reason: 'the same per-peer bloom must be passed to the '
+                'strategy so dedup state stays per-peer');
+
+        await peer.stop();
+        transport.close();
+        discovery.close();
+      },
+    );
+  });
+
+  // Harness accepts an injected RelayStrategy (Ticket #48 / spec §2).
+  //
+  // Asserts that `_Harness(strategyFactory: ...)` uses the supplied
+  // strategy on every peer instead of the default
+  // `MirrorRelayStrategy`. The recording strategy observes which
+  // peer's `onIncoming` fired and how many times.
+  group('_Harness strategy injection', () {
+    test(
+      '_Harness(strategyFactory: ...) constructs peers with the supplied '
+      'strategy',
+      () async {
+        final harness = _Harness(
+          peerCount: 2,
+          messageCount: 1,
+          deliveryLatency: Duration.zero,
+          jitter: Duration.zero,
+          strategyFactory: (d) => _RecordingRelayStrategy(),
+        );
+        await harness.bootstrap();
+
+        // Every peer must share the SAME recording strategy instance.
+        final strategies = harness.peers.map((p) => p.strategy).toList();
+        expect(strategies, hasLength(2));
+        expect(identical(strategies[0], strategies[1]), isTrue,
+            reason: 'one strategy per harness, shared across all peers');
+
+        // Push a message into peer 0's transport → strategy must fire
+        // exactly once, with peer 0's id.
+        final firstStrategy =
+            harness.peers[0].strategy as _RecordingRelayStrategy;
+        final firstCallsBefore = firstStrategy.onIncomingCalls;
+        final msg = Message.create(
+          mode: MessageMode.broadcast,
+          type: MessageType.chat,
+          channelId: 'public',
+          senderId: 'external',
+          payload: Uint8List(0),
+          ttl: 3,
+        );
+        await harness.peers[0].transport.send(msg);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(firstStrategy.onIncomingCalls, firstCallsBefore + 1,
+            reason: 'injected strategy must be the one peer 0 delegates '
+                'to, so its onIncoming count goes up by exactly one');
+        expect(firstStrategy.lastPeerId, harness.peers[0].peerId);
+
+        await harness.teardown();
+      },
+    );
+  });
+
+  // Production `_Peer` must catch strategy exceptions and continue
+  // processing. This is the test that pins the try/catch on the real
+  // `_Peer` (the parallel `peer_error_isolation_test.dart` exercises
+  // the semantic on a fixture because the production type is library-
+  // private; this test is the source of truth on the production code).
+  group('_Peer error isolation', () {
+    test(
+      'throwing strategy raises peerErrorCount; the peer keeps listening',
+      () async {
+        final discovery = LoopbackMeshDiscovery(
+          deliveryLatency: Duration.zero,
+          jitter: Duration.zero,
+        );
+        final transport = LoopbackTransport(name: 'peer-throws');
+        final throwingStrategy = _ThrowingRelayStrategy();
+
+        final peer = _Peer(
+          peerId: 'peer-throws',
+          transport: transport,
+          bloom: BloomFilter.empty(),
+          discovery: discovery,
+          ttl: 3,
+          strategy: throwingStrategy,
+        );
+        peer.start();
+
+        final msg = Message.create(
+          mode: MessageMode.broadcast,
+          type: MessageType.chat,
+          channelId: 'public',
+          senderId: 'external',
+          payload: Uint8List(0),
+          ttl: 3,
+        );
+        await transport.send(msg);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(peer.peerErrorCount, 1,
+            reason: 'production _Peer must catch the strategy exception '
+                'and increment peerErrorCount');
+        expect(peer.relayedCount, 0,
+            reason: 'relayedCount must not advance when the strategy threw');
+
+        // Drive a second message — the subscription must still be live.
+        await transport.send(msg);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(peer.peerErrorCount, 2,
+            reason: 'subscription must remain subscribed after the throw; '
+                'a second error must be counted');
+
+        await peer.stop();
+        transport.close();
+        discovery.close();
+      },
+    );
+  });
+}
+
+/// Test-only [RelayStrategy] that records every call. Used by the
+/// peer-wiring test in [main] to verify that `_Peer.start()` actually
+/// delegates to the injected strategy.
+class _RecordingRelayStrategy implements RelayStrategy {
+  int onIncomingCalls = 0;
+  String? lastPeerId;
+  Message? lastMsg;
+  BloomFilter? lastSeenCache;
+
+  @override
+  Message? onIncoming({
+    required String peerId,
+    required Message msg,
+    required BloomFilter seenCache,
+  }) {
+    onIncomingCalls++;
+    lastPeerId = peerId;
+    lastMsg = msg;
+    lastSeenCache = seenCache;
+    return null;
+  }
+
+  @override
+  void originate({required String senderId, required Message msg}) {}
+
+  @override
+  Future<void> close() async {}
+}
+
+/// Test-only [RelayStrategy] that throws on every `onIncoming` call.
+/// Used by the production `_Peer` error-isolation test to assert the
+/// try/catch semantics on the real `_Peer` type.
+class _ThrowingRelayStrategy implements RelayStrategy {
+  @override
+  Message? onIncoming({
+    required String peerId,
+    required Message msg,
+    required BloomFilter seenCache,
+  }) {
+    throw StateError('boom');
+  }
+
+  @override
+  void originate({required String senderId, required Message msg}) {}
+
+  @override
+  Future<void> close() async {}
 }
 
 Future<void> _runScenario(String scenario,
