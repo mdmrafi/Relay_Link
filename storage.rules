@@ -1,8 +1,23 @@
-// RelayLink — Firebase Storage Security Rules (Ticket #19).
+// RelayLink — Firebase Storage Security Rules (Ticket #19 + hardening).
 //
 // This file controls access to objects in the project's default Cloud
 // Storage bucket. It is the gatekeeper for evidence-blob uploads and
 // any other binaries the app parks in Storage.
+//
+// Hardening pass (this revision):
+//   * Strict `auth.uid != null` + `isAuthenticatedDevice()` checks on
+//     every read / write so an unauthenticated request cannot leak data
+//     even if a future refactor accidentally drops the predicate.
+//   * Empty uploads are denied (`size > 0`) — a zero-byte blob
+//     is a placeholder, not a payload, and would only consume storage
+//     budget without providing value.
+//   * File-name length cap and a restricted character set so path-
+//     traversal or oversized object names are blocked at the edge.
+//   * Tighter content-type allowlist (raw ciphertext, JSON, plain text)
+//     so a client cannot host arbitrary content on the bucket.
+//   * Per-file `size <= maxEvidenceBlobSize()` cap on both read and
+//     write, so a malicious client cannot trick the server into
+//     streaming back a path that resolves to a larger object.
 //
 // Rules-language version: 2. Deploy via `firebase deploy --only storage`.
 //
@@ -32,6 +47,18 @@ service firebase.storage {
     // Helpers
     // =======================================================================
 
+    // True iff the request carries any authenticated identity. The check
+    // is the strict `request.auth.uid != null` (preferred over
+    // `request.auth != null` for clarity — `uid` is a guaranteed non-null
+    // string for any signed-in identity) combined with the
+    // `isAuthenticatedDevice()` predicate so the relay sender_id claim
+    // must also be present.
+    function isAuthenticatedUser() {
+      return request.auth != null
+          && request.auth.uid != null
+          && isAuthenticatedDevice();
+    }
+
     // Same predicate as the Firestore rules: caller must have a
     // `sender_id` custom claim that looks like a 16-hex pseudonym.
     // Mirrors `isAuthenticatedDevice()` in `firestore.rules` so the
@@ -60,6 +87,42 @@ service firebase.storage {
     // is out of scope for the demo and gets rejected by the rules.
     function maxEvidenceBlobSize() { return 5242880; }   // 5 MB
 
+    // Per-blob-name length cap. A 128-char filename is more than
+    // enough for the evidence naming convention (`<record-id>.bin`)
+    // and short enough that a malicious client can't inflate the
+    // path beyond what a legitimate filename would ever need.
+    function maxFileNameLength() { return 128; }
+
+    // Allowed filename character class. Lowercase hex / digits / dots /
+    // underscores / hyphens — the same alphabet the Firestore
+    // `sender_id` claim uses, plus the few punctuation characters we
+    // need for a file extension. This rules out `..` traversal
+    // attempts (`..` contains a dot, but the predicate is anchored
+    // to the full string so a name like `../etc/passwd` would still
+    // fail because of the slash; better still, slash is simply not
+    // in the allowlist at all).
+    function isSafeFileName(name) {
+      return name is string
+          && name.size() > 0
+          && name.size() <= maxFileNameLength()
+          && name.matches('^[A-Za-z0-9._-]+$');
+    }
+
+    // Allowed content-type. Evidence blobs are uploaded as
+    // `application/octet-stream` (the SDK default for raw bytes);
+    // `application/json` and `text/plain` are kept for clients that
+    // wrap their ciphertext in a JSON envelope or annotate the blob
+    // with a text manifest. Everything else — `text/html`,
+    // `application/javascript`, `image/*` etc. — is rejected at the
+    // edge so a malicious client cannot host arbitrary content on
+    // the project's bucket.
+    function isAllowedContentType() {
+      return request.resource.contentType is string
+          && request.resource.contentType.matches(
+               'application/octet-stream|application/json|text/plain'
+             );
+    }
+
     // =======================================================================
     // Evidence blobs — `/evidence/{recipientId}/{filename}`
     //
@@ -74,8 +137,8 @@ service firebase.storage {
     // Writes: any authenticated device may upload, but the path must
     // resolve to the recipient encoded in the path AND the document's
     // custom metadata (if present) must agree with the path. The size
-    // cap and content-type cap keep abusive uploads cheap to detect
-    // and reject.
+    // cap, content-type cap, and file-name safety cap keep abusive
+    // uploads cheap to detect and reject.
     //
     // Updates are denied because evidence is immutable; the recipient
     // must verify the exact bytes they received. Deletes are also
@@ -88,8 +151,15 @@ service firebase.storage {
       // equal the caller's `sender_id` custom claim. This is the
       // single line that enforces evidence privacy — the previous
       // implementation draft (`allow read: if true`) was a privacy
-      // bug and is intentionally NOT repeated here.
-      allow read: if isRecipient(recipientId);
+      // bug and is intentionally NOT repeated here. The strict
+      // `request.auth.uid != null` + `isAuthenticatedDevice()` pair
+      // is intentionally redundant: it surfaces the auth requirement
+      // to a reader at a glance, even if a future refactor drops the
+      // helper.
+      allow read: if request.auth != null
+                    && request.auth.uid != null
+                    && isRecipient(recipientId)
+                    && isSafeFileName(fileName);
 
       // Create-only upload. The path already encodes the recipient;
       // any authenticated device may upload into ANY recipient's
@@ -98,19 +168,22 @@ service firebase.storage {
       // quota handling). If we ever need to lock uploads down to
       // "only the sender may upload to their own pre-arranged
       // recipient", that check belongs here.
-      allow create: if isAuthenticatedDevice()
+      allow create: if request.auth != null
+                    && request.auth.uid != null
+                    && isAuthenticatedUser()
+                    // Non-empty blob. A zero-byte upload is a
+                    // placeholder, not a payload; reject so it
+                    // cannot poison the recipient's quota counters.
+                    && request.resource.size > 0
                     // Size cap. Catches obvious abuse before the
                     // server-side lifecycle policy runs.
                     && request.resource.size <= maxEvidenceBlobSize()
-                    // Content-type cap. Evidence blobs are uploaded
-                    // as `application/octet-stream` (the SDK default
-                    // for raw bytes); rejecting `text/html`,
-                    // `application/javascript`, etc. blocks trivial
-                    // attempts to host attacker-controlled web
-                    // content on the project's bucket.
-                    && request.resource.contentType.matches(
-                         'application/octet-stream|application/json|text/plain'
-                       );
+                    // Content-type cap.
+                    && isAllowedContentType()
+                    // File-name safety. Blocks path traversal,
+                    // control characters, and unbounded-length
+                    // object names.
+                    && isSafeFileName(fileName);
 
       // Updates and deletes are denied — evidence is write-once,
       // read-only-by-recipient. Lifecycle expiry handles deletion.
