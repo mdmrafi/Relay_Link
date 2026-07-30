@@ -124,9 +124,10 @@ class BloomFilter {
   }
 
   /// Boolean OR of two filters of identical sizing into a new filter.
-  /// Used to compute symmetric difference: `A ∪ B` represents the union of
-  /// all IDs known to either side, so `A.mightContain(x) && B.mightContain(x)`
-  /// is true exactly for the symmetric difference `A ∆ B`.
+  /// `A ∪ B` represents the union of all IDs known to either side. The
+  /// symmetric difference `A ∆ B` is `(A ∪ B) \ (A ∧ B)` — equivalently,
+  /// `A.mightContain(x) != B.mightContain(x)`. `mightContain` may have
+  /// false positives, so both sides of the equation are approximate.
   BloomFilter union(BloomFilter other) {
     if (other._bits.length != _bits.length) {
       throw ArgumentError('Bloom filter size mismatch');

@@ -183,6 +183,8 @@ class BroadcastCrypto {
       mac: Mac(envelope.mac),
     );
 
+    // AAD binds the ciphertext to its channel — an envelope captured on the
+    // public channel cannot be replayed under a custom channel id.
     return _aesGcm.decrypt(box, secretKey: secretKey, aad: aad);
   }
 

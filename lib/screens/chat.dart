@@ -34,7 +34,9 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import 'package:relaylink/alerts/allowlist.dart';
 import 'package:relaylink/models/message.dart';
+import 'package:relaylink/widgets/verified_badge.dart';
 
 /// Status of a message as the UI sees it. The transport layer will be
 /// responsible for advancing these values when an ACK arrives or a send
@@ -148,6 +150,7 @@ class ChatScreen extends StatefulWidget {
     this.senderDisplayName = 'Me',
     this.channelId = 'public',
     this.channelName = 'Public channel',
+    this.verifiedCache,
   });
 
   /// The injected controller. Defaults to a [LocalChatController] so the
@@ -166,6 +169,13 @@ class ChatScreen extends StatefulWidget {
 
   /// Human-readable channel name shown in the app bar.
   final String channelName;
+
+  /// Offline-first allowlist lookup used by the ALERT verified badge
+  /// (Ticket #37). When null, the chat renders a "Signed by: <name>" pill
+  /// for ALERT messages instead of "Verified: <name>" — i.e. the
+  /// receiver-side trust decision is always local and never claims a
+  /// sender-controlled field is verified.
+  final VerifiedOrgsCache? verifiedCache;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -250,6 +260,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       return _MessageBubble(
                         message: msg,
                         isOwn: msg.senderId == widget.senderId,
+                        verifiedCache: widget.verifiedCache,
                       );
                     },
                   );
@@ -310,10 +321,15 @@ class _ChatEmptyState extends StatelessWidget {
 /// One rendered message row: header (sender + timestamp + alert badge),
 /// body text, and a small footer row (type + origin + status).
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.isOwn});
+  const _MessageBubble({
+    required this.message,
+    required this.isOwn,
+    required this.verifiedCache,
+  });
 
   final Message message;
   final bool isOwn;
+  final VerifiedOrgsCache? verifiedCache;
 
   @override
   Widget build(BuildContext context) {
@@ -343,7 +359,11 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               isOwn ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: <Widget>[
-            _BubbleHeader(message: message, isOwn: isOwn),
+            _BubbleHeader(
+              message: message,
+              isOwn: isOwn,
+              verifiedCache: verifiedCache,
+            ),
             const SizedBox(height: 4),
             Text(
               _decodeBody(message.payload),
@@ -361,10 +381,15 @@ class _MessageBubble extends StatelessWidget {
 
 /// Header row of a bubble: sender name + relative timestamp + ALERT badge.
 class _BubbleHeader extends StatelessWidget {
-  const _BubbleHeader({required this.message, required this.isOwn});
+  const _BubbleHeader({
+    required this.message,
+    required this.isOwn,
+    required this.verifiedCache,
+  });
 
   final Message message;
   final bool isOwn;
+  final VerifiedOrgsCache? verifiedCache;
 
   @override
   Widget build(BuildContext context) {
@@ -374,14 +399,30 @@ class _BubbleHeader extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        Text(
-          displayName,
-          key: ValueKey<String>('chatBubbleSender::${message.id}'),
-          style: Theme.of(context).textTheme.labelLarge,
+        Flexible(
+          child: Text(
+            displayName,
+            key: ValueKey<String>('chatBubbleSender::${message.id}'),
+            style: Theme.of(context).textTheme.labelLarge,
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
         if (message.type == MessageType.alert) ...<Widget>[
           const SizedBox(width: 6),
-          _VerifiedBadge(messageId: message.id),
+          // Inline style keeps the badge one line so the Row can never
+          // overflow; the chip style would add a colored background that
+          // makes the layout larger than the bubble can hold.
+          VerifiedBadge(
+            key: ValueKey<String>('chatBubbleAlertBadge::${message.id}'),
+            senderPubkey: message.senderId,
+            displayName: displayName,
+            // Receiver-side: only show "Verified" when the cache has been
+            // injected AND the pubkey is on the local allowlist. Otherwise
+            // fall back to the "Signed by" pill — the same widget, with no
+            // trust claim.
+            cache: verifiedCache ?? _emptyVerifiedCache(),
+            style: VerifiedBadgeStyle.inline,
+          ),
         ],
         const SizedBox(width: 8),
         Text(
@@ -436,33 +477,14 @@ class _BubbleFooter extends StatelessWidget {
   }
 }
 
-/// Tiny "VERIFIED" pill shown next to ALERT messages. Implemented as a
-/// private widget so tests can find it by `chatBubbleAlertBadge::<id>`.
-class _VerifiedBadge extends StatelessWidget {
-  const _VerifiedBadge({required this.messageId});
+/// Empty allowlist cache used when the chat screen is mounted without a
+/// `VerifiedOrgsCache` (e.g. in widget tests). It rejects every pubkey, so
+/// the rendered pill is always the "Signed by" variant — i.e. never claiming
+/// any sender is verified when the receiver hasn't loaded the allowlist.
+VerifiedOrgsCache _emptyVerifiedCache() =>
+    VerifiedOrgsCache.withFetcher(_emptyFetcher);
 
-  final String messageId;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      key: ValueKey<String>('chatBubbleAlertBadge::$messageId'),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: const Color(0xFFEF5350),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: const Text(
-        'VERIFIED',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 10,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-    );
-  }
-}
+Future<List<String>> _emptyFetcher() async => const <String>[];
 
 /// Bottom composer row: a row of [ChatComposerType] chips + a text field +
 /// a send button. Built as its own widget so tests can mount it in

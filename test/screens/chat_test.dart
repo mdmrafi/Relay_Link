@@ -11,7 +11,9 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:relaylink/alerts/allowlist.dart';
 import 'package:relaylink/models/message.dart';
 import 'package:relaylink/screens/chat.dart';
 
@@ -26,6 +28,12 @@ Future<void> _pump(WidgetTester tester, Widget child) async {
 }
 
 void main() {
+  setUp(() {
+    // VerifiedOrgsCache.init() reads/writes SharedPreferences; mock with
+    // an empty store so cache.init() never hits a platform channel.
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+  });
+
   group('ChatScreen — empty state', () {
     testWidgets('renders the empty state when no messages exist',
         (WidgetTester tester) async {
@@ -84,10 +92,22 @@ void main() {
       expect(find.text('CHAT'), findsOneWidget);
     });
 
-    testWidgets('ALERT messages show the VERIFIED badge',
+    testWidgets(
+        'ALERT messages render the receiver-side VerifiedBadge — '
+        'verified when senderId is on the allowlist',
         (WidgetTester tester) async {
       final controller = LocalChatController();
-      await _pump(tester, ChatScreen(controller: controller));
+      // Allowlist is loaded; senderId 'org-1' is on it.
+      final cache = VerifiedOrgsCache.withFetcher(
+        () async => <String>['org-1'],
+      );
+      // Cache starts empty; init() loads from the fetcher.
+      await cache.init();
+
+      await _pump(
+        tester,
+        ChatScreen(controller: controller, verifiedCache: cache),
+      );
 
       await controller.sendMessage(
         type: MessageType.alert,
@@ -100,7 +120,62 @@ void main() {
       final id = controller.messages.last.id;
       expect(find.byKey(ValueKey<String>('chatBubbleAlertBadge::$id')),
           findsOneWidget);
-      expect(find.text('VERIFIED'), findsOneWidget);
+      // Verified branch: green "Verified: <name>".
+      expect(find.text('Verified: Rescue Co.'), findsOneWidget);
+    });
+
+    testWidgets(
+        'ALERT messages render "Signed by" when senderId is NOT on the '
+        'allowlist (receiver-side trust, never claims verification)',
+        (WidgetTester tester) async {
+      final controller = LocalChatController();
+      // Allowlist exists but does NOT contain the sender.
+      final cache = VerifiedOrgsCache.withFetcher(
+        () async => const <String>['some-other-org'],
+      );
+      await cache.init();
+
+      await _pump(
+        tester,
+        ChatScreen(controller: controller, verifiedCache: cache),
+      );
+
+      await controller.sendMessage(
+        type: MessageType.alert,
+        body: 'Watch out',
+        senderId: 'unknown-peer',
+        senderDisplayName: 'Unknown Sender',
+      );
+      await tester.pump();
+
+      final id = controller.messages.last.id;
+      expect(find.byKey(ValueKey<String>('chatBubbleAlertBadge::$id')),
+          findsOneWidget);
+      // Receiver-side: never claim verification for unknown pubkeys.
+      expect(find.text('Signed by: Unknown Sender'), findsOneWidget);
+      expect(find.textContaining('Verified:'), findsNothing);
+    });
+
+    testWidgets(
+        'ALERT messages without an injected cache default to "Signed by"',
+        (WidgetTester tester) async {
+      final controller = LocalChatController();
+      // No verifiedCache injected — must NOT claim verification.
+      await _pump(tester, ChatScreen(controller: controller));
+
+      await controller.sendMessage(
+        type: MessageType.alert,
+        body: 'Heads up',
+        senderId: 'org-1',
+        senderDisplayName: 'Rescue Co.',
+      );
+      await tester.pump();
+
+      final id = controller.messages.last.id;
+      expect(find.byKey(ValueKey<String>('chatBubbleAlertBadge::$id')),
+          findsOneWidget);
+      expect(find.text('Signed by: Rescue Co.'), findsOneWidget);
+      expect(find.textContaining('Verified:'), findsNothing);
     });
 
     testWidgets('non-alert messages do NOT show the VERIFIED badge',

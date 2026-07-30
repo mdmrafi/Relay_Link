@@ -301,6 +301,13 @@ void main() {
       // Channel-id AAD tamper (defense-in-depth): an attacker who re-routes
       // a captured ciphertext to a different channel id must still fail
       // authentication.
+      //
+      // To prove this is the AAD binding firing (and not "we used the
+      // wrong key because Bob doesn't have that channel registered"),
+      // we register kPublicChannelId in cryptoB with the SAME key as the
+      // custom channel. If AAD binding were broken, decrypt would succeed
+      // under the (now-matching) key; AAD binding forces an auth failure.
+      cryptoB.setChannelKey(kPublicChannelId, sharedChannelKey);
       final spoofedEnvelope = BroadcastEnvelope(
         channelId: kPublicChannelId, // lie about the channel
         nonce: envelope.nonce,
@@ -309,13 +316,10 @@ void main() {
       );
       await expectLater(
         () => cryptoB.decryptString(spoofedEnvelope),
-        throwsA(anyOf(
-          isA<SecretBoxAuthenticationError>(),
-          // Bob doesn't have the public key in this test setup; if AAD is
-          // not bound, decrypt would proceed under the wrong key. We seed
-          // it so AAD-check is what fires.
-          isA<SecretBoxAuthenticationError>(),
-        )),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+        reason: 'AAD binding must force auth failure when channel id is '
+            'spoofed, even if the decrypting device has the correct key '
+            'registered for the spoofed channel',
       );
     }, timeout: const Timeout(Duration(seconds: 60)));
 

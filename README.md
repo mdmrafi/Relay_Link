@@ -308,38 +308,48 @@ X3DH is incompatible with the spec's protocol design.
   transport.** This is the "if-the-binding-fallback-had-not-shipped"
   implementation that future work could swap in.
 - `lib/crypto/direct.dart` — the HKDF-chain-only binding-fallback
-  (`DirectSession`). This is the class actually used by the production
-  DIRECT code path: `lib/sms/direct_adapter.dart` and `lib/transport/internet.dart`.
-  Forward secrecy across the chain is preserved (each message key is
-  `HKDF(previous_message_key, "rl-msg-v1")`, chain key discarded after
-  use, one-byte sender tag gives Alice→Bob and Bob→Alice independent
-  chains from the same QR-derived seed). Post-compromise security
-  is **not** provided in production: a leaked current chain key exposes
-  all future keys until the chain is re-seeded.
+  (`DirectSession`). **Library status:** shipped and tested by
+  `test/crypto/direct_test.dart` (forward secrecy across the chain is
+  preserved — each message key is `HKDF(previous_message_key, "rl-msg-v1")`,
+  chain key discarded after use, one-byte sender tag gives Alice→Bob and
+  Bob→Alice independent chains from the same QR-derived seed). **No
+  production transport wiring today:** neither `lib/sms/direct_adapter.dart`
+  nor `lib/transport/internet.dart` imports `DirectSession`. The receive
+  path on DIRECT-over-SMS is unfinished (`SmsTransport.incoming` is
+  itself pending ticket #25/#26), and the internet transport's
+  send/receive code path does not call into `DirectSession` either.
+  Post-compromise security is **not** provided in any shipped code path:
+  a leaked current chain key would expose all future keys until the
+  chain is re-seeded.
 
 **The demo's "forward secrecy" claim:**
 
 The `forward_secrecy_demo` tool and the `direct_test.dart` suite prove
 honest forward secrecy on the HKDF chain (prior messages still decrypt
 after a compromise at message N). The demo does **not** prove
-post-compromise security: production sends do not ratchet, so a leaked
-chain key still exposes future messages. The demo also does **not** prove
-the full Double Ratchet in production — the `double_ratchet_test.dart`
-suite proves the library round-trips, but the application has not been
-wired to call it.
+post-compromise security: the HKDF chain does not ratchet DH keys, so
+a leaked chain key still exposes future messages. The demo also does
+**not** prove the full Double Ratchet in production — the
+`double_ratchet_test.dart` suite proves the library round-trips, but
+the application has not been wired to call it. **The demo does not
+prove any production DIRECT transport wiring either:** the demo
+exercises `DirectSession` directly; no production code path routes a
+DIRECT message through `DirectSession` today.
 
 **For the judges**: STRESS-TEST §0 documents that the user chose
 spec-fidelity-over-safety on every trade-off, but D5's fallback rule was
 baked into the spec itself (hour-6 verdict + bind-the-fallback). The
-HKDF-chain binding-fallback is honored — it is the production path,
-exercised by the demo, and tested by `direct_test.dart`. The user has
-the full Double Ratchet in tree as a library, and the from-scratch
+HKDF-chain binding-fallback is honored — it ships as a tested library
+in `lib/crypto/direct.dart` (test: `direct_test.dart`). The user has
+the full Double Ratchet in tree as a tested library, and the from-scratch
 implementation delivered by ticket #13 (`cutrev-ratchet`) is the natural
 follow-up if the binding-fallback path is later swapped out. That swap
-is mechanical work (route `DirectSession` → `DoubleRatchetSession` in
-the two transport call sites) and is recorded as
+is two-part mechanical work: (a) wire `DirectSession` into the
+production transports, then (b) swap `DirectSession` →
+`DoubleRatchetSession` at the same call sites. Both parts are recorded
+as
 [ticket #47](.scratch/relaylink-build/issues/47-wire-double-ratchet-direct.md);
-it is not part of this build.
+they are not part of this build.
 
 ---
 
@@ -658,9 +668,13 @@ MIT — see [`LICENSE`](LICENSE).
 libsignal_protocol_dart) কোনোটির পাবলিক API-তে X3DH বাইপাস করার
 পথ নেই, কিন্তু স্পেকে X3DH স্কিপ করা হয়েছে। তাই D5-এর বাধ্যতামূলক
 ফলব্যাক অনুযায়ী HKDF চেইন রাখা হয়েছে `lib/crypto/direct.dart`-এ
-(`DirectSession`) — এটা প্রোডাকশন DIRECT পাথে ব্যবহৃত হচ্ছে
-(`lib/sms/direct_adapter.dart`, `lib/transport/internet.dart`)। এরপর
-টিকেট #13 (`cutrev-ratchet`) পিওর ডার্টে সম্পূর্ণ Double Ratchet
+(`DirectSession`) — পরীক্ষিত লাইব্রেরি (`direct_test.dart`),
+forward secrecy আছে, post-compromise security নেই। **আজ কোনো
+প্রোডাকশন transport এটা ব্যবহার করছে না:** `lib/sms/direct_adapter.dart`
+ও `lib/transport/internet.dart` কেউই `DirectSession` import করে না
+(ডাইরেক্ট-ওভার-SMS রিসিভ পাথ `SmsTransport.incoming` নিজেই টিকেট
+#25/#26-এ বাকি, ইন্টারনেট ট্রান্সপোর্টও `DirectSession`-কে কল করে না)।
+এরপর টিকেট #13 (`cutrev-ratchet`) পিওর ডার্টে সম্পূর্ণ Double Ratchet
 বাস্তবায়ন করেছে `lib/crypto/double_ratchet.dart`-এ
 (`DoubleRatchetSession`)। এটা পরীক্ষিত (`double_ratchet_test.dart`)
 কিন্তু **library-only** — কোনো transport-এ wire করা হয়নি। তাই
