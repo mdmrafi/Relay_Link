@@ -61,7 +61,35 @@ class BroadcastEnvelope {
     required this.ciphertext,
     required this.mac,
   });
+
+  /// Decode an envelope from raw UTF-8 JSON bytes (as carried in a
+  /// `Message.payload` field). Used by the chat widget test seam and by
+  /// any relay that needs to peek at the embedded channel id.
+  ///
+  /// Throws [FormatException] if the input is not a `{channelId, nonce,
+  /// ciphertext, mac}` JSON object.
+  factory BroadcastEnvelope.fromJsonBytes(List<int> bytes) {
+    final map = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+    return BroadcastEnvelope(
+      channelId: map['channelId'] as String,
+      nonce: _decodeB64(map['nonce'] as String),
+      ciphertext: _decodeB64(map['ciphertext'] as String),
+      mac: _decodeB64(map['mac'] as String),
+    );
+  }
+
+  /// Serialize this envelope to a JSON-compatible map. Used by the
+  /// `LocalChatController` to encode the ciphertext into a
+  /// `Message.payload` field.
+  Map<String, dynamic> toJsonMap() => <String, dynamic>{
+        'channelId': channelId,
+        'nonce': base64.encode(nonce),
+        'ciphertext': base64.encode(ciphertext),
+        'mac': base64.encode(mac),
+      };
 }
+
+List<int> _decodeB64(String s) => base64.decode(s);
 
 /// Thrown when [BroadcastCrypto.decrypt] is called with a [channelId] we
 /// have no key for.

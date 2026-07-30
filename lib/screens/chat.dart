@@ -36,6 +36,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:relaylink/alerts/allowlist.dart';
+import 'package:relaylink/crypto/broadcast.dart';
 import 'package:relaylink/models/message.dart';
 import 'package:relaylink/widgets/verified_badge.dart';
 
@@ -65,6 +66,21 @@ enum ChatComposerType {
   final String label;
 }
 
+/// Asynchronous decryptor used by the chat widget to recover the plaintext
+/// body of an inbound message. Implementations receive a [Message] (whose
+/// `payload` is ciphertext for BROADCAST or Double-Ratchet ciphertext for
+/// DIRECT) and return the original UTF-8 string.
+///
+/// Returning `null` means "I cannot decrypt this" — the widget falls back
+/// to displaying the raw payload bytes as a printable string.
+///
+/// The contract is intentionally narrow: the chat widget does NOT know
+/// about `BroadcastCrypto`, channel keys, or ratchet state. Production
+/// code wires in the real decryptor backed by
+/// `BroadcastCrypto.decryptString` and (eventually)
+/// `DoubleRatchetSession.decrypt`. Tests inject a tiny fake.
+typedef MessageDecryptor = Future<String?> Function(Message message);
+
 /// The single seam between the chat widget and any persistence / transport
 /// implementation. Production code can implement this against Firestore +
 /// `TransportManager`; tests use [LocalChatController].
@@ -84,10 +100,10 @@ abstract class ChatController extends ChangeNotifier {
   /// [senderId] / [senderDisplayName] on [channelId]. Returns the produced
   /// [Message] so the widget can show a pending state.
   ///
-  /// The default implementation in [LocalChatController] appends it to the
-  /// in-memory list and returns it synchronously; production code would
-  /// hand it to `TransportManager.fanOutSend` and resolve once fan-out
-  /// completes.
+  /// Implementations SHOULD encrypt the body before stuffing it into
+  /// `Message.payload` (see `LocalChatController` for the canonical
+  /// BROADCAST wiring). Production code would hand it to
+  /// `TransportManager.fanOutSend` and resolve once fan-out completes.
   Future<Message> sendMessage({
     required MessageType type,
     required String body,
@@ -95,6 +111,11 @@ abstract class ChatController extends ChangeNotifier {
     String senderDisplayName,
     String channelId = 'public',
   });
+
+  /// Decrypt the body of [message] for display. Returning `null` means
+  /// "I cannot decrypt this right now" — the widget falls back to the
+  /// raw payload bytes (printed as hex if non-UTF-8).
+  Future<String?> decryptForDisplay(Message message) async => null;
 
   /// Mark [messageId] as having reached [status]. No-op if the id is unknown.
   /// Implemented in [LocalChatController] but called by transport ACK
@@ -104,8 +125,31 @@ abstract class ChatController extends ChangeNotifier {
 
 /// In-memory [ChatController] used by tests and by demo / debug builds. Not
 /// thread-safe — fine for tests, do not use from real transports.
+///
+/// Wire-format contract: BROADCAST messages are encrypted with the
+/// channel's `BroadcastCrypto` key (default = the embedded `networkKey`
+/// for the `"public"` channel) and the resulting `BroadcastEnvelope`
+/// JSON is stored in `Message.payload`. The widget reads plaintext back
+/// by injecting a [MessageDecryptor] (typically one that calls
+/// `BroadcastCrypto.decryptString` on the parsed envelope).
 class LocalChatController extends ChatController {
+  /// Construct an in-memory chat controller. Pass [crypto] to inject a
+  /// `BroadcastCrypto` instance; defaults to a fresh one with the
+  /// embedded `networkKey` so demo runs work out of the box.
+  LocalChatController({BroadcastCrypto? crypto})
+      : _crypto = crypto ?? BroadcastCrypto();
+
   final List<Message> _messages = <Message>[];
+
+  /// Crypto used to encrypt outgoing BROADCAST bodies and (via
+  /// [messageDecryptor]) decrypt inbound ones for display.
+  final BroadcastCrypto _crypto;
+
+  /// Decryptor injected by the widget layer. When `null`, the chat
+  /// widget falls back to UTF-8 decoding the payload (kept for back-
+  /// compat with early tests; production code must inject a real one
+  /// backed by [_crypto]).
+  MessageDecryptor? messageDecryptor;
 
   @override
   List<Message> get messages => List<Message>.unmodifiable(_messages);
@@ -121,17 +165,30 @@ class LocalChatController extends ChatController {
     String senderDisplayName = '',
     String channelId = 'public',
   }) async {
+    // Encrypt the body under the channel key so the on-wire payload is
+    // ciphertext, not plaintext. The widget never sees `body`; it sees
+    // the envelope and asks [messageDecryptor] to recover plaintext.
+    final env = await _crypto.encryptString(body, channelId);
+    final payloadBytes = utf8.encode(jsonEncode(env.toJsonMap()));
+
     final msg = Message.create(
       mode: MessageMode.broadcast,
       type: type,
       channelId: channelId,
       senderId: senderId,
       senderDisplayName: senderDisplayName,
-      payload: _utf8(body),
+      payload: Uint8List.fromList(payloadBytes),
     );
     _messages.add(msg);
     notifyListeners();
     return msg;
+  }
+
+  @override
+  Future<String?> decryptForDisplay(Message message) {
+    final dec = messageDecryptor;
+    if (dec == null) return Future<String?>.value(null);
+    return dec(message);
   }
 
   @override
@@ -262,6 +319,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         message: msg,
                         isOwn: msg.senderId == widget.senderId,
                         verifiedCache: widget.verifiedCache,
+                        controller: widget.controller,
                       );
                     },
                   );
@@ -321,24 +379,59 @@ class _ChatEmptyState extends StatelessWidget {
 
 /// One rendered message row: header (sender + timestamp + alert badge),
 /// body text, and a small footer row (type + origin + status).
-class _MessageBubble extends StatelessWidget {
+class _MessageBubble extends StatefulWidget {
   const _MessageBubble({
     required this.message,
     required this.isOwn,
     required this.verifiedCache,
+    required this.controller,
   });
 
   final Message message;
   final bool isOwn;
   final VerifiedOrgsCache? verifiedCache;
+  final ChatController controller;
+
+  @override
+  State<_MessageBubble> createState() => _MessageBubbleState();
+}
+
+class _MessageBubbleState extends State<_MessageBubble> {
+  /// Decrypted plaintext, or `null` if the decryptor hasn't resolved yet
+  /// (or returned null). The widget rebuilds once the future settles.
+  String? _decrypted;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveDecrypted();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MessageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.message.id != widget.message.id) {
+      _decrypted = null;
+      _resolveDecrypted();
+    }
+  }
+
+  Future<void> _resolveDecrypted() async {
+    final pt = await widget.controller.decryptForDisplay(widget.message);
+    if (!mounted) return;
+    setState(() => _decrypted = pt);
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final message = widget.message;
+    final isOwn = widget.isOwn;
     final bubbleColor = isOwn
         ? const Color(0xFF1E3A5F)
         : const Color(0xFF1F2933);
     final align = isOwn ? Alignment.centerRight : Alignment.centerLeft;
+    final body = _decrypted ?? _decodeBody(message.payload);
 
     return Align(
       alignment: align,
@@ -363,11 +456,11 @@ class _MessageBubble extends StatelessWidget {
             _BubbleHeader(
               message: message,
               isOwn: isOwn,
-              verifiedCache: verifiedCache,
+              verifiedCache: widget.verifiedCache,
             ),
             const SizedBox(height: 4),
             Text(
-              _decodeBody(message.payload),
+              body,
               key: ValueKey<String>('chatBubbleBody::${message.id}'),
               style: theme.textTheme.bodyMedium,
             ),

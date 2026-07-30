@@ -49,12 +49,16 @@ messages, with zero infrastructure required. On top of the mesh it stacks
 three things, in this priority order:
 
 1. **Encryption.** BROADCAST (group) messages use AES-256-GCM with a
-   per-channel symmetric key. DIRECT (1:1) messages use the HKDF-chain
-   binding-fallback (`DirectSession` in `lib/crypto/direct.dart`) which
-   provides forward secrecy but not post-compromise security. A full
-   Double Ratchet (`DoubleRatchetSession` in `lib/crypto/double_ratchet.dart`)
-   ships as a tested library but is **not wired into any transport**;
-   see the [D5 disclosure](#d5--double-ratchet-implementation-status-full-disclosure)
+   per-channel symmetric key, **wired end-to-end** through
+   `LocalChatController` (the chat screen's send path encrypts with
+   `BroadcastCrypto` keyed on `channelId`, and the read path calls a
+   `MessageDecryptor` to recover plaintext for display). DIRECT (1:1)
+   messages use the HKDF-chain binding-fallback (`DirectSession` in
+   `lib/crypto/direct.dart`) which provides forward secrecy but not
+   post-compromise security. A full Double Ratchet
+   (`DoubleRatchetSession` in `lib/crypto/double_ratchet.dart`) ships
+   as a tested library but is **not wired into any transport**; see
+   the [D5 disclosure](#d5--double-ratchet-implementation-status-full-disclosure)
    for the honest split.
 2. **Connectivity fallback.** When you send an SOS, RelayLink tries every
    radio the device has at once: mesh, SMS, and internet. You don't pick.
@@ -354,7 +358,7 @@ A brief map of the layers — for the detailed spec see
 | Layer | Responsibility | Key files |
 |---|---|---|
 | **Identity** | Ed25519 + X25519 keypair generation, keypair storage in Keystore/Keychain, sender-id derivation | `lib/crypto/identity.dart` |
-| **BROADCAST crypto** | AES-256-GCM with per-channel key, channel-id bound as AAD, default public key shipped + custom channels (key gen + QR) | `lib/crypto/broadcast.dart` |
+| **BROADCAST crypto** | AES-256-GCM with per-channel key, channel-id bound as AAD, default public key shipped + custom channels (key gen + QR). **Wired end-to-end** into the chat widget (`LocalChatController` encrypts bodies, `MessageDecryptor` decrypts for display). | `lib/crypto/broadcast.dart`, `lib/screens/chat.dart` |
 | **DIRECT crypto** | Production uses HKDF-chain binding-fallback (`DirectSession`); full Double Ratchet (`DoubleRatchetSession`) exists as a tested library but is not transport-wired | `lib/crypto/direct.dart`, `lib/crypto/double_ratchet.dart` |
 | **Message schema** | 16-field JSON message with plaintext routing metadata + ciphertext payload + Ed25519 signature | `lib/models/message.dart` |
 | **Storage** | sqflite for messages / seen-cache / vault, flutter_secure_storage for keys | `lib/storage/` |
@@ -640,11 +644,13 @@ MIT — see [`LICENSE`](LICENSE).
 - **অফলাইন মেশ মেসেজিং** — দুটো বা ততোধিক ফোন Bluetooth-এর মাধ্যমে
   মেসেজ পাঠায় ও রিলে করে, কোনো ইনফ্রাস্ট্রাকচার ছাড়াই।
 - **এন্ড-টু-এন্ড এনক্রিপশন** — BROADCAST (গ্রুপ) মেসেজের জন্য
-  AES-256-GCM, DIRECT (১:১) মেসেজের জন্য HKDF-চেইন binding-fallback
-  (`DirectSession` in `lib/crypto/direct.dart` — forward secrecy আছে,
-  post-compromise security নেই)। সম্পূর্ণ Double Ratchet
-  (`DoubleRatchetSession` in `lib/crypto/double_ratchet.dart`) পরীক্ষিত
-  লাইব্রেরি হিসেবে আছে, কিন্তু কোনো transport-এ wire করা হয়নি।
+  AES-256-GCM (`LocalChatController` মেসেজ encrypt করে, widget
+  display-এর সময় `MessageDecryptor` দিয়ে decrypt করে — অর্থাৎ
+  end-to-end wire করা আছে), DIRECT (১:১) মেসেজের জন্য HKDF-চেইন
+  binding-fallback (`DirectSession` in `lib/crypto/direct.dart` —
+  forward secrecy আছে, post-compromise security নেই)। সম্পূর্ণ
+  Double Ratchet (`DoubleRatchetSession` in `lib/crypto/double_ratchet.dart`)
+  পরীক্ষিত লাইব্রেরি হিসেবে আছে, কিন্তু কোনো transport-এ wire করা হয়নি।
 - **সংযোগ-ফলব্যাক** — একটি SOS একসাথে মেশ, SMS ও ইন্টারনেট তিন
   রাস্তায়ই পাঠানোর চেষ্টা করে; ব্যবহারকারীকে পছন্দ করতে হয় না।
 - **টেক্সট-অনলি Evidence Vault** — আলাদা একটি সারফেস যেখানে ব্যবহারকারী

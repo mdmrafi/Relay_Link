@@ -8,12 +8,18 @@
 //   5. Tapping the send button calls the controller and renders the body.
 //   6. The type selector changes the wire type used by the next send.
 //   7. Different origins render different origin icons.
+//   8. BROADCAST messages are encrypted with BroadcastCrypto on the way out;
+//      the chat widget renders decrypted plaintext via the injected
+//      MessageDecryptor. Without a decryptor, ciphertext stays opaque.
+
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:relaylink/alerts/allowlist.dart';
+import 'package:relaylink/crypto/broadcast.dart';
 import 'package:relaylink/models/message.dart';
 import 'package:relaylink/screens/chat.dart';
 
@@ -25,6 +31,15 @@ Future<void> _pump(WidgetTester tester, Widget child) async {
     ),
   );
   await tester.pump();
+}
+
+/// Pump until the chat widget's async decrypt future has resolved and the
+/// bubble has rebuilt with plaintext. Used by the crypto tests where the
+/// plaintext is only available after a microtask tick.
+Future<void> _pumpUntilDecrypted(WidgetTester tester) async {
+  for (var i = 0; i < 5; i++) {
+    await tester.pump(const Duration(milliseconds: 1));
+  }
 }
 
 void main() {
@@ -61,6 +76,14 @@ void main() {
     testWidgets('renders sender, body, timestamp, and type label',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      // In-memory controller has no real decryptor; inject a fake that
+      // recovers plaintext from the BroadcastEnvelope JSON the controller
+      // encoded into the payload.
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       await _pump(tester, ChatScreen(controller: controller));
 
       // Send a message via the controller so the message ends up in the list.
@@ -71,6 +94,8 @@ void main() {
         senderDisplayName: 'Alice',
       );
       await tester.pump();
+      // Let the async decrypt future settle so the bubble shows plaintext.
+      await _pumpUntilDecrypted(tester);
 
       expect(find.byKey(const ValueKey<String>('chatEmptyState')),
           findsNothing);
@@ -97,6 +122,12 @@ void main() {
         'verified when senderId is on the allowlist',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      // In-memory controller needs a decryptor so the alert body renders.
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       // Allowlist is loaded; senderId 'org-1' is on it.
       final cache = VerifiedOrgsCache.withFetcher(
         () async => <String>['org-1'],
@@ -129,6 +160,11 @@ void main() {
         'allowlist (receiver-side trust, never claims verification)',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       // Allowlist exists but does NOT contain the sender.
       final cache = VerifiedOrgsCache.withFetcher(
         () async => const <String>['some-other-org'],
@@ -160,6 +196,11 @@ void main() {
         'ALERT messages without an injected cache default to "Signed by"',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       // No verifiedCache injected — must NOT claim verification.
       await _pump(tester, ChatScreen(controller: controller));
 
@@ -181,6 +222,11 @@ void main() {
     testWidgets('non-alert messages do NOT show the VERIFIED badge',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       await _pump(tester, ChatScreen(controller: controller));
 
       await controller.sendMessage(
@@ -199,6 +245,11 @@ void main() {
     testWidgets('falls back to senderId when display name is empty',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       await _pump(tester, ChatScreen(controller: controller));
 
       await controller.sendMessage(
@@ -210,6 +261,68 @@ void main() {
       await tester.pump();
 
       expect(find.text('anon-42'), findsOneWidget);
+    });
+  });
+
+  group('ChatScreen — end-to-end crypto', () {
+    testWidgets(
+        'BROADCAST messages encrypt the body on the way out and the widget '
+        'renders the decrypted plaintext via the injected decryptor',
+        (WidgetTester tester) async {
+      final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
+      await _pump(tester, ChatScreen(controller: controller));
+
+      await controller.sendMessage(
+        type: MessageType.chat,
+        body: 'secret',
+        senderId: 'me',
+        senderDisplayName: 'Me',
+      );
+      await tester.pump();
+      await _pumpUntilDecrypted(tester);
+
+      final m = controller.messages.single;
+      // The on-the-wire payload is the BroadcastEnvelope JSON, NOT the
+      // raw UTF-8 of the body. This is the crypto-not-wired-finding fix.
+      expect(String.fromCharCodes(m.payload), isNot(equals('secret')));
+      final env = BroadcastEnvelope.fromJsonBytes(m.payload);
+      expect(env.channelId, 'public');
+      expect(env.ciphertext, isNot(equals(utf8.encode('secret'))));
+      final recovered = await crypto.decryptString(env);
+      expect(recovered, 'secret');
+
+      // The widget renders the plaintext via the decryptor.
+      expect(find.text('secret'), findsOneWidget);
+    });
+
+    testWidgets(
+        'without a MessageDecryptor, BROADCAST messages render as their '
+        'opaque envelope (treated as text, not silently rendered as garbage)',
+        (WidgetTester tester) async {
+      final controller = LocalChatController();
+      // No decryptor injected.
+      await _pump(tester, ChatScreen(controller: controller));
+
+      await controller.sendMessage(
+        type: MessageType.chat,
+        body: 'hello',
+        senderId: 'me',
+        senderDisplayName: 'Me',
+      );
+      await tester.pump();
+
+      // Plaintext "hello" is NOT rendered (the payload is ciphertext).
+      expect(find.text('hello'), findsNothing);
+      // The envelope is short enough to fit in the bubble — make sure the
+      // body widget exists so the user can see something is there.
+      final id = controller.messages.last.id;
+      expect(find.byKey(ValueKey<String>('chatBubbleBody::$id')),
+          findsOneWidget);
     });
   });
 
@@ -234,6 +347,11 @@ void main() {
     testWidgets('tapping the send button delivers a message with default type',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       await _pump(tester, ChatScreen(controller: controller));
 
       await tester.enterText(
@@ -250,17 +368,26 @@ void main() {
       expect(controller.messages, hasLength(1));
       final m = controller.messages.single;
       expect(m.type, MessageType.chat);
-      expect(String.fromCharCodes(m.payload), 'ping');
+      // The on-the-wire payload is the BroadcastEnvelope JSON; the body
+      // round-trips through BroadcastCrypto + the injected decryptor.
+      expect(String.fromCharCodes(m.payload), isNot(equals('ping')));
+      final env = BroadcastEnvelope.fromJsonBytes(m.payload);
+      expect(await crypto.decryptString(env), 'ping');
       expect(m.senderId, 'me');
       expect(m.channelId, 'public');
 
-      // The bubble now renders the body.
+      // The bubble renders the plaintext via the decryptor.
       expect(find.text('ping'), findsOneWidget);
     });
 
     testWidgets('selecting a type changes the next send wire type',
         (WidgetTester tester) async {
       final controller = LocalChatController();
+      final crypto = BroadcastCrypto();
+      controller.messageDecryptor = (msg) async {
+        final env = BroadcastEnvelope.fromJsonBytes(msg.payload);
+        return crypto.decryptString(env);
+      };
       await _pump(tester, ChatScreen(controller: controller));
 
       await tester.tap(
