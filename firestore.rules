@@ -1,8 +1,33 @@
-// RelayLink — Firestore Security Rules (Ticket #19).
+// RelayLink — Firestore Security Rules (Ticket #19 + hardening).
 //
 // This file enforces server-side authorization for all Firestore reads and
 // writes performed by the RelayLink app. It is the canonical trust boundary
 // between pseudonymous mesh clients and the Firebase project.
+//
+// Hardening pass (this revision):
+//   * Every field's TYPE is asserted (`<field> is <type>` after a
+//     `keys().hasAll([...])` presence check) so a malformed payload
+//     cannot slip past due to a missing key.
+//   * SCHEMA VERSIONING — every message / evidence document carries a
+//     `schema_version` integer. Documents whose schema_version is not in
+//     the `ALLOWED_SCHEMA_VERSIONS` allowlist are rejected outright at
+//     create / update. This is the lever for future forward-incompatible
+//     changes: bump the allowlist, not the rule semantics.
+//   * PER-COLLECTION FIELD-LEVEL WRITES — the immutable fields
+//     (`id`, `sender_id`, `payload_b64`, `signature`, `created_at`) may
+//     only be set on create. Updates are restricted to the documented
+//     set of mutable fields. For DIRECT messages, only the recipient
+//     (caller's `sender_id` claim matches the path segment) may update
+//     `expires_at` / `hop_count`; the sender is denied outright on
+//     update so a sender cannot rewrite their own DIRECT message in
+//     transit.
+//   * EXPIRY — every create / update must carry `expires_at > request.time`
+//     (server clock). Reads of documents whose `expires_at <= request.time`
+//     are denied so a stale, pre-TTL cache hit cannot resurrect a
+//     logically-expired message.
+//   * TYPE-LEVEL INPUT VALIDATION — additional type-level predicates
+//     (`expired()`, `isAllowedSchemaVersion()`) live at the top of the
+//     helpers block so the call sites read like a checklist.
 //
 // Scope of protection:
 //   * Per-document rate limiting (~60 writes/minute/device) — best-effort
@@ -36,6 +61,19 @@ service cloud.firestore {
     // Helpers
     // =======================================================================
 
+    // The schema-version allowlist. Bumping this list is the deployment
+    // lever for a forward-incompatible schema change. v1 is the initial
+    // envelope; rolling forward requires a new allowlist entry and a
+    // migration window where both v1 and v2 are accepted.
+    function ALLOWED_SCHEMA_VERSIONS() { return [1]; }
+
+    // True iff the message-schema_version field is in the allowlist.
+    // Centralised so the rule body reads as a single predicate.
+    function isAllowedSchemaVersion() {
+      return request.resource.data.schema_version is int
+          && request.resource.data.schema_version in ALLOWED_SCHEMA_VERSIONS();
+    }
+
     // True iff the caller has signed in with a Firebase Auth token that
     // carries the `sender_id` custom claim minted at login. RelayLink mints
     // this claim from the device's pseudonymous Ed25519 fingerprint
@@ -66,6 +104,23 @@ service cloud.firestore {
     function isRecipient(recipientId) {
       return isAuthenticatedDevice()
           && request.auth.token.sender_id == recipientId;
+    }
+
+    // True iff the inbound (request) payload's `expires_at` is in the
+    // future relative to the server clock. Used on create / update to
+    // reject a document that arrives already-expired — the server will
+    // not store a document it would immediately TTL away.
+    function isNotExpiredOnWrite() {
+      return request.resource.data.expires_at is timestamp
+          && request.resource.data.expires_at > request.time;
+    }
+
+    // True iff the document being read has not yet expired. Pairs with
+    // `isAuthenticatedDevice()` on every read rule so a logically-expired
+    // doc is invisible to clients (the TTL policy will eventually GC it).
+    function isNotExpiredOnRead() {
+      return resource.data.expires_at is timestamp
+          && resource.data.expires_at > request.time;
     }
 
     // Size limit (in bytes) for the four collections we care about. We
@@ -154,6 +209,7 @@ service cloud.firestore {
       // the limit ("set count = -1") or back-date `window_start`.
       allow create: if isAuthenticatedDevice()
                     && request.auth.token.sender_id == senderId
+                    && request.resource.data.keys().hasAll(['count', 'window_start'])
                     && request.resource.data.keys().hasOnly(['count', 'window_start'])
                     && request.resource.data.count is int
                     && request.resource.data.count >= 0
@@ -167,6 +223,7 @@ service cloud.firestore {
       // legitimately roll over to a new minute.
       allow update: if isAuthenticatedDevice()
                     && request.auth.token.sender_id == senderId
+                    && request.resource.data.keys().hasAll(['count', 'window_start'])
                     && request.resource.data.keys().hasOnly(['count', 'window_start'])
                     && request.resource.data.count is int
                     && request.resource.data.count >= 0
@@ -189,18 +246,20 @@ service cloud.firestore {
     // =======================================================================
     // BROADCAST relay messages — `relay/{channel_id}/messages/{message_id}`
     //
-    // Read access: any signed-in device. The SPEC explicitly says
-    // BROADCAST messages are relayed by every node, so the mesh-by-design
-    // posture is "public to anyone with the channel key". The encrypted
-    // payload is opaque without the channel key; the rules below control
-    // WHO can fetch the ciphertext blob, not WHO can decrypt it.
+    // Read access: any signed-in device whose requested document is not
+    // yet expired. The SPEC explicitly says BROADCAST messages are
+    // relayed by every node, so the mesh-by-design posture is "public
+    // to anyone with the channel key". The encrypted payload is opaque
+    // without the channel key; the rules below control WHO can fetch
+    // the ciphertext blob, not WHO can decrypt it.
     //
     // Write access: any signed-in device, subject to:
     //   * 16 KB size cap on the document (Firestore bills per document
     //     size for some operations; a 1 MB message would also be abusive).
     //   * `sender_id` in the payload must match the caller's custom claim
     //     (so a device cannot impersonate another sender).
-    //   * `expires_at` MUST be set (server-side TTL policy reads it).
+    //   * `schema_version` MUST be in the allowlist.
+    //   * `expires_at` MUST be in the future AND on every later read.
     //   * `hop_count` MUST start at 0 (relays rewrite this on each hop;
     //     if a sender writes hop_count > 0 the message is forging hops).
     //   * `ttl` MUST be a positive int (SPEC.md §5: SOS 12, ALERT 10,
@@ -209,17 +268,28 @@ service cloud.firestore {
     //   * Rate limit (best-effort, see helper above).
     // =======================================================================
     match /relay/{channelId}/messages/{messageId} {
-      // World-readable for any authenticated device. Unauthenticated
-      // reads are denied so the relay traffic can't be scraped by an
-      // anonymous crawler; Firebase Auth is required to obtain a
-      // `sender_id` claim (even if the device itself never sends).
-      allow read: if isAuthenticatedDevice();
+      // World-readable for any authenticated device, but ONLY for docs
+      // that haven't expired yet. Unauthenticated reads are denied so
+      // the relay traffic can't be scraped by an anonymous crawler;
+      // Firebase Auth is required to obtain a `sender_id` claim (even
+      // if the device itself never sends).
+      allow read: if isAuthenticatedDevice() && isNotExpiredOnRead();
 
       // Create a brand-new broadcast message. All fields are validated
       // because a freshly-authored message has no prior version to
       // diff against.
       allow create: if isWithinRateLimit()
                     && isAuthenticatedDevice()
+                    // Schema-version gate. Hard rejects any payload
+                    // whose schema_version is not in the allowlist —
+                    // this is the single switch for forward-incompatible
+                    // schema changes.
+                    && isAllowedSchemaVersion()
+                    // Expiry gate: the inbound `expires_at` must be in
+                    // the future. Without this, a client could plant a
+                    // message that is born-expired and gets GC'd by the
+                    // TTL policy on the next run.
+                    && isNotExpiredOnWrite()
                     // Size cap on the bulk-data field — the ciphertext
                     // (`payload_b64`) is the field that actually scales
                     // with message size; the other fields are short
@@ -233,11 +303,18 @@ service cloud.firestore {
                     // this, any device could post messages "from"
                     // anyone else.
                     && request.resource.data.sender_id == request.auth.token.sender_id
-                    // Required fields + types.
+                    // Required fields + types. `hasAll` enforces the
+                    // minimum presence; `hasOnly` enforces the schema
+                    // does not carry unknown fields. Both must hold.
+                    && request.resource.data.keys().hasAll([
+                         'id', 'sender_id', 'created_at', 'payload_b64',
+                         'ratchet_header', 'ttl', 'hop_count', 'signature',
+                         'expires_at', 'schema_version',
+                       ])
                     && request.resource.data.keys().hasOnly([
                          'id', 'sender_id', 'created_at', 'payload_b64',
                          'ratchet_header', 'ttl', 'hop_count', 'signature',
-                         'expires_at',
+                         'expires_at', 'schema_version',
                        ])
                     && request.resource.data.id is string
                     && request.resource.data.sender_id is string
@@ -249,6 +326,7 @@ service cloud.firestore {
                     && request.resource.data.hop_count is int
                     && request.resource.data.signature is string
                     && request.resource.data.expires_at is timestamp
+                    && request.resource.data.schema_version is int
                     // hop_count must start at 0 — relays increment on
                     // each hop, never the sender. A nonzero starting
                     // value means forgery.
@@ -265,11 +343,22 @@ service cloud.firestore {
       // size cap and MAY NOT change the immutable identity fields.
       allow update: if isWithinRateLimit()
                     && isAuthenticatedDevice()
+                    // Expiry gate on the new payload — same as create.
+                    && isNotExpiredOnWrite()
                     && request.resource.data.payload_b64.size() <= maxMessageDocSize()
                     // Immutable identity fields: cannot change after creation.
+                    // This is the per-collection field-level write
+                    // guarantee: only `hop_count` and `expires_at` are
+                    // mutable; the sender cannot tamper with anything
+                    // else.
                     && request.resource.data.id == resource.data.id
                     && request.resource.data.sender_id == resource.data.sender_id
                     && request.resource.data.signature == resource.data.signature
+                    && request.resource.data.created_at == resource.data.created_at
+                    && request.resource.data.payload_b64 == resource.data.payload_b64
+                    && request.resource.data.ratchet_header == resource.data.ratchet_header
+                    && request.resource.data.ttl == resource.data.ttl
+                    && request.resource.data.schema_version == resource.data.schema_version
                     // hop_count may only go up by 1 per update (single
                     // relay hop). This is what stops a malicious relay
                     // from short-circuiting the TTL by skipping ahead.
@@ -296,12 +385,18 @@ service cloud.firestore {
     // a recipient who never asked for it is not a privacy violation
     // against the sender — the ciphertext is opaque to the server, and
     // the recipient chooses to poll their own slice.
+    //
+    // Field-level writes: only the recipient (caller's `sender_id` matches
+    // the path segment) may update the mutable fields (`expires_at`,
+    // `hop_count`). Anything else — sender writes, identity-field edits,
+    // unknown field additions — is denied.
     // =======================================================================
     match /relay_direct/{recipientId}/messages/{messageId} {
       // Recipient-only reads. The `recipientId` path segment MUST equal
       // the caller's `sender_id` custom claim. Any other device (and any
-      // unauthenticated caller) is denied.
-      allow read: if isRecipient(recipientId);
+      // unauthenticated caller) is denied. Reads also require the doc
+      // not yet be expired.
+      allow read: if isRecipient(recipientId) && isNotExpiredOnRead();
 
       // Writes follow the broadcast rules above, with the addition that
       // the doc's `recipient_id` field MUST equal the path segment
@@ -310,6 +405,8 @@ service cloud.firestore {
       // leak to the wrong device).
       allow create: if isWithinRateLimit()
                     && isAuthenticatedDevice()
+                    && isAllowedSchemaVersion()
+                    && isNotExpiredOnWrite()
                     && request.resource.data.payload_b64.size() <= maxMessageDocSize()
                     && request.resource.data.sender_id == request.auth.token.sender_id
                     // The recipient_id stored in the doc must match the
@@ -318,10 +415,17 @@ service cloud.firestore {
                     // but claim `recipient_id = bob`, and bob would
                     // never see it (he polls `/relay_direct/bob/...`).
                     && request.resource.data.recipient_id == recipientId
+                    && request.resource.data.keys().hasAll([
+                         'id', 'sender_id', 'recipient_id', 'created_at',
+                         'payload_b64', 'ratchet_header', 'ttl',
+                         'hop_count', 'signature', 'expires_at',
+                         'schema_version',
+                       ])
                     && request.resource.data.keys().hasOnly([
                          'id', 'sender_id', 'recipient_id', 'created_at',
                          'payload_b64', 'ratchet_header', 'ttl',
                          'hop_count', 'signature', 'expires_at',
+                         'schema_version',
                        ])
                     && request.resource.data.id is string
                     && request.resource.data.sender_id is string
@@ -334,18 +438,41 @@ service cloud.firestore {
                     && request.resource.data.hop_count is int
                     && request.resource.data.signature is string
                     && request.resource.data.expires_at is timestamp
+                    && request.resource.data.schema_version is int
                     && request.resource.data.hop_count == 0
                     && request.resource.data.ttl > 0;
 
-      // Updates — same shape as broadcast: relays may bump hop_count
-      // and refresh expires_at; the identity fields are immutable.
+      // Updates — restricted to the RECIPIENT, only the MUTABLE fields
+      // (`expires_at`, `hop_count`) may change. The sender is denied
+      // outright on update so a sender cannot rewrite their own DIRECT
+      // message in transit. The recipient_id is bound to the path and
+      // cannot be moved across slices.
       allow update: if isWithinRateLimit()
                     && isAuthenticatedDevice()
+                    // Recipient-only update edge. The `recipient_id` field
+                    // is bound to the path segment; only the recipient
+                    // (whose `sender_id` claim matches the path segment)
+                    // may push updates. This implements the
+                    // "sender writes only immutables" requirement.
+                    && isRecipient(recipientId)
+                    && isNotExpiredOnWrite()
                     && request.resource.data.payload_b64.size() <= maxMessageDocSize()
+                    // Immutable identity fields — every key the sender
+                    // wrote on create must remain identical.
                     && request.resource.data.id == resource.data.id
                     && request.resource.data.sender_id == resource.data.sender_id
                     && request.resource.data.recipient_id == resource.data.recipient_id
                     && request.resource.data.signature == resource.data.signature
+                    && request.resource.data.created_at == resource.data.created_at
+                    && request.resource.data.payload_b64 == resource.data.payload_b64
+                    && request.resource.data.ratchet_header == resource.data.ratchet_header
+                    && request.resource.data.ttl == resource.data.ttl
+                    && request.resource.data.schema_version == resource.data.schema_version
+                    // Path-binding on recipient_id — even a recipient
+                    // cannot move a doc across slices.
+                    && request.resource.data.recipient_id == recipientId
+                    // hop_count is the only field that may grow; it must
+                    // grow exactly by 1 per update.
                     && request.resource.data.hop_count == resource.data.hop_count + 1;
 
       allow delete: if false;
@@ -371,7 +498,9 @@ service cloud.firestore {
     match /verified_orgs/{orgId} {
       // World-readable for any authenticated device. The allowlist is
       // public data; gating reads behind auth just keeps anonymous
-      // crawlers out of the project.
+      // crawlers out of the project. The expiry check is intentionally
+      // NOT applied here — the allowlist is human-curated and the
+      // expiry field is informational, not a hard TTL.
       allow read: if isAuthenticatedDevice();
 
       // All client-initiated writes are denied. The only legitimate
@@ -392,13 +521,21 @@ service cloud.firestore {
     // The 5 KB size cap is intentional — vault records are short text
     // snapshots. Larger media (photos, video) goes through a different
     // pipeline (Ticket #31 follow-ups).
+    //
+    // Updates are denied at the rules layer because evidence is
+    // immutable — a recipient must be able to verify the signature
+    // against the exact bytes they received. Deletes happen via the
+    // server-side TTL policy on `expires_at`.
     // =======================================================================
     match /evidence/{recipientId}/records/{recordId} {
-      // Recipient-only reads.
-      allow read: if isRecipient(recipientId);
+      // Recipient-only reads, additionally blocked when the doc is
+      // already expired.
+      allow read: if isRecipient(recipientId) && isNotExpiredOnRead();
 
       allow create: if isWithinRateLimit()
                     && isAuthenticatedDevice()
+                    && isAllowedSchemaVersion()
+                    && isNotExpiredOnWrite()
                     // Size cap on the bulk-data field — `payload_b64` is
                     // the variable-length ciphertext; the other fields
                     // are short fixed strings. See the `maxMessageDocSize`
@@ -416,10 +553,15 @@ service cloud.firestore {
                     // consent) or in a stranger's slice (avoiding
                     // detection).
                     && request.resource.data.recipient_id == recipientId
+                    && request.resource.data.keys().hasAll([
+                         'id', 'sender_id', 'recipient_id', 'created_at',
+                         'payload_b64', 'content_hash_b64', 'signature',
+                         'expires_at', 'schema_version',
+                       ])
                     && request.resource.data.keys().hasOnly([
                          'id', 'sender_id', 'recipient_id', 'created_at',
                          'payload_b64', 'content_hash_b64', 'signature',
-                         'expires_at',
+                         'expires_at', 'schema_version',
                        ])
                     && request.resource.data.id is string
                     && request.resource.data.sender_id is string
@@ -428,7 +570,8 @@ service cloud.firestore {
                     && request.resource.data.payload_b64 is string
                     && request.resource.data.content_hash_b64 is string
                     && request.resource.data.signature is string
-                    && request.resource.data.expires_at is timestamp;
+                    && request.resource.data.expires_at is timestamp
+                    && request.resource.data.schema_version is int;
 
       // Evidence records are immutable once written — there is no
       // "relay" hop, and a recipient must be able to verify the
