@@ -337,4 +337,20 @@ class RemoteChatController extends ChatController {
     await _directSessionStore.put(invite.deviceId, session);
     return session;
   }
+
+  /// Static helper used by the production wiring in `main.dart` so
+  /// the Contacts-screen "Pair via invite" flow does not need to
+  /// instantiate a full `RemoteChatController`. Equivalent to
+  /// [pairWithInvite] but takes the local identity directly.
+  static Future<DirectSession> pairWithInviteStatic({
+    required DeviceIdentity identity,
+    required ContactInvite invite,
+    required bool isInitiator,
+  }) async {
+    return ContactInviteCodec.bootstrapSession(
+      self: identity,
+      invite: invite,
+      isInitiator: isInitiator,
+    );
+  }
 }

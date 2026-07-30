@@ -126,6 +126,31 @@ String deriveContactShortId(String id) {
   return source.length <= 8 ? source : source.substring(0, 8);
 }
 
+/// Pair-via-invite outcome returned to the production wiring.
+class PairInviteResult {
+  /// Human-readable label for the just-paired contact (the invite's
+  /// `displayName`, or the deviceId prefix when empty).
+  final String displayName;
+
+  /// The peer's device id (16-hex `senderId`).
+  final String deviceId;
+
+  /// The peer's X25519 public key (raw 32 bytes), or `null` if the
+  /// invite did not carry one (defensive — current codec always does).
+  final Uint8List? x25519PublicKey;
+
+  const PairInviteResult({
+    required this.displayName,
+    required this.deviceId,
+    required this.x25519PublicKey,
+  });
+}
+
+/// Pair-via-invite callback signature. The production wiring does the
+/// crypto + session bootstrap + persistence; the widget just collects
+/// the token from the user and reports back what happened.
+typedef PairInviteCallback = Future<PairInviteResult?> Function(String token);
+
 /// The contacts page. Pass a [repository] for persistence; pass
 /// [myDeviceIdentityLabel] to render the local device's identity under
 /// "Show my QR" (typically the device's `senderId` from `DeviceIdentity`).
@@ -135,6 +160,7 @@ class ContactsPage extends StatefulWidget {
     required this.repository,
     this.myDeviceIdentityLabel = '',
     this.onAddContactPressed,
+    this.onPairViaInvite,
   });
 
   /// Persistence seam (see [ContactsRepository]).
@@ -149,6 +175,14 @@ class ContactsPage extends StatefulWidget {
   /// for a display name; tests can wire a no-op or counter to verify
   /// the button is wired without invoking the camera.
   final VoidCallback? onAddContactPressed;
+
+  /// Optional callback for the "Pair via invite" affordance. The
+  /// production wiring decodes a `ContactInvite` token, derives a
+  /// `DirectSession` via `ContactInviteCodec.bootstrapSession`, and
+  /// persists it through `DirectSessionStore`. The widget is kept
+  /// crypto-agnostic — it just collects the token, hands it to the
+  /// callback, and surfaces success / failure.
+  final PairInviteCallback? onPairViaInvite;
 
   @override
   State<ContactsPage> createState() => _ContactsPageState();
@@ -203,6 +237,79 @@ class _ContactsPageState extends State<ContactsPage> {
       ),
     );
     if (!mounted) return;
+  }
+
+  /// "Pair via invite" entry point. Shows a paste-invite dialog. If the
+  /// user pastes a valid token and the production [onPairViaInvite]
+  /// callback returns a non-null result, we persist the contact row
+  /// into the repository and refresh the list.
+  Future<void> _pairViaInvite() async {
+    final callback = widget.onPairViaInvite;
+    if (callback == null) {
+      // No wiring — surface a helpful no-op so the gesture is still
+      // observable in tests.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pair-via-invite is not wired in this build')),
+      );
+      return;
+    }
+    final token = await showDialog<String>(
+      context: context,
+      builder: (BuildContext ctx) => const _PairViaInviteDialog(),
+    );
+    if (token == null) return;
+    if (!mounted) return;
+    PairInviteResult? result;
+    Object? error;
+    try {
+      result = await callback(token);
+    } catch (e) {
+      error = e;
+    }
+    if (!mounted) return;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Pair failed: $error')),
+      );
+      return;
+    }
+    if (result == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invite was not a valid contact invite')),
+      );
+      return;
+    }
+    // Persist into the repository so the row shows up in the list and
+    // any later SMS-fan-out resolution can find the device-id → phone
+    // mapping. The full `Contact` row uses the deviceId as the
+    // canonical id (the legacy Ticket #40 convention), and the
+    // peer's X25519 public key as the "publicKey" string (hex-encoded
+    // for compactness).
+    final pkHex = result.x25519PublicKey == null
+        ? ''
+        : result.x25519PublicKey!
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+    await widget.repository.save(
+      Contact(
+        id: result.deviceId,
+        displayName: result.displayName,
+        publicKey: pkHex,
+        phoneNumber: null,
+      ),
+    );
+    if (!mounted) return;
+    setState(_reload);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.displayName.isEmpty
+              ? 'Paired with ${result.deviceId}'
+              : 'Paired with ${result.displayName}',
+        ),
+      ),
+    );
   }
 
   Future<void> _editContact(Contact contact) async {
@@ -285,6 +392,12 @@ class _ContactsPageState extends State<ContactsPage> {
             onPressed: _showMyQr,
           ),
           IconButton(
+            key: const ValueKey<String>('contactsPairInviteButton'),
+            tooltip: 'Pair via invite',
+            icon: const Icon(Icons.group_add_outlined),
+            onPressed: widget.onPairViaInvite == null ? null : _pairViaInvite,
+          ),
+          IconButton(
             key: const ValueKey<String>('contactsAddButton'),
             tooltip: 'Add contact',
             icon: const Icon(Icons.person_add),
@@ -300,7 +413,11 @@ class _ContactsPageState extends State<ContactsPage> {
           }
           final contacts = snap.data!;
           if (contacts.isEmpty) {
-            return _EmptyContacts(onAddContactPressed: widget.onAddContactPressed);
+            return _EmptyContacts(
+              onAddContactPressed: widget.onAddContactPressed,
+              onPairViaInvite:
+                  widget.onPairViaInvite == null ? null : _pairViaInvite,
+            );
           }
           return RefreshIndicator(
             onRefresh: _refresh,
@@ -326,9 +443,13 @@ class _ContactsPageState extends State<ContactsPage> {
 
 /// Empty-state placeholder shown when the contact list is empty.
 class _EmptyContacts extends StatelessWidget {
-  const _EmptyContacts({this.onAddContactPressed});
+  const _EmptyContacts({
+    this.onAddContactPressed,
+    this.onPairViaInvite,
+  });
 
   final VoidCallback? onAddContactPressed;
+  final VoidCallback? onPairViaInvite;
 
   @override
   Widget build(BuildContext context) {
@@ -341,7 +462,7 @@ class _EmptyContacts extends StatelessWidget {
           const Text('No contacts yet'),
           const SizedBox(height: 4),
           const Text(
-            'Add a contact by scanning their QR code.',
+            'Add a contact by scanning their QR code, or pair via invite.',
             key: ValueKey<String>('contactsEmptySubtitle'),
           ),
           const SizedBox(height: 16),
@@ -351,6 +472,15 @@ class _EmptyContacts extends StatelessWidget {
             icon: const Icon(Icons.person_add),
             label: const Text('Add contact'),
           ),
+          if (onPairViaInvite != null) ...<Widget>[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              key: const ValueKey<String>('contactsEmptyPairInviteButton'),
+              onPressed: onPairViaInvite,
+              icon: const Icon(Icons.group_add_outlined),
+              label: const Text('Pair via invite'),
+            ),
+          ],
         ],
       ),
     );
@@ -658,4 +788,101 @@ String _qrPayloadFor(Contact contact) {
   return 'relaylink://contact/v1?'
       'pk=${Uri.encodeComponent(contact.publicKey)}'
       '&id=${Uri.encodeComponent(contact.id)}';
+}
+
+// ---------------------------------------------------------------------------
+// Pair-via-invite dialog
+// ---------------------------------------------------------------------------
+
+/// Dialog that collects an invite token from the user (paste or scan),
+/// then returns the trimmed string when the user taps "Pair". Cancel
+/// returns `null`. The actual decode + crypto pairing lives in the
+/// production [PairInviteCallback] — this dialog is purely UI.
+class _PairViaInviteDialog extends StatefulWidget {
+  const _PairViaInviteDialog();
+
+  @override
+  State<_PairViaInviteDialog> createState() => _PairViaInviteDialogState();
+}
+
+class _PairViaInviteDialogState extends State<_PairViaInviteDialog> {
+  late final TextEditingController _token;
+
+  @override
+  void initState() {
+    super.initState();
+    _token = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _token.dispose();
+    super.dispose();
+  }
+
+  void _paste() async {
+    final data = await Clipboard.getData('text/plain');
+    final text = data?.text ?? '';
+    if (!mounted) return;
+    setState(() => _token.text = text.trim());
+  }
+
+  void _submit() {
+    final t = _token.text.trim();
+    if (t.isEmpty) return;
+    Navigator.of(context).pop(t);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const ValueKey<String>('contactsPairInviteDialog'),
+      title: const Text('Pair via invite'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'Paste an invite token from your peer. The token starts with '
+            '"relaylink-invite-v1:".',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey<String>('contactsPairInviteField'),
+            controller: _token,
+            autofocus: true,
+            minLines: 3,
+            maxLines: 6,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              hintText: 'relaylink-invite-v1:...',
+            ),
+            keyboardType: TextInputType.multiline,
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: const ValueKey<String>('contactsPairInvitePasteButton'),
+              onPressed: _paste,
+              icon: const Icon(Icons.paste),
+              label: const Text('Paste from clipboard'),
+            ),
+          ),
+        ],
+      ),
+      actions: <Widget>[
+        TextButton(
+          key: const ValueKey<String>('contactsPairInviteCancelButton'),
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey<String>('contactsPairInviteSubmitButton'),
+          onPressed: _submit,
+          child: const Text('Pair'),
+        ),
+      ],
+    );
+  }
 }

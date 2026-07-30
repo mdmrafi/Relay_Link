@@ -199,6 +199,7 @@ class HomeScreen extends ConsumerWidget {
     this.onComposeTapped,
     this.onChannelsTapped,
     this.onVaultTapped,
+    this.onContactsTapped,
   });
 
   /// Tab to show when the screen first builds. Defaults to [HomeTab.home].
@@ -224,6 +225,11 @@ class HomeScreen extends ConsumerWidget {
   /// Called when the user taps the "Vault" quick action.
   final VoidCallback? onVaultTapped;
 
+  /// Called when the user taps the "Contacts" quick action. Wired by
+  /// production bootstrap; tests leave this null and the button is
+  /// hidden.
+  final VoidCallback? onContactsTapped;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return _HomeBody(
@@ -233,6 +239,7 @@ class HomeScreen extends ConsumerWidget {
       onComposeTapped: onComposeTapped,
       onChannelsTapped: onChannelsTapped,
       onVaultTapped: onVaultTapped,
+      onContactsTapped: onContactsTapped,
     );
   }
 }
@@ -248,6 +255,7 @@ class _HomeBody extends ConsumerStatefulWidget {
     required this.onComposeTapped,
     required this.onChannelsTapped,
     required this.onVaultTapped,
+    required this.onContactsTapped,
   });
 
   final HomeTab initialTab;
@@ -256,6 +264,7 @@ class _HomeBody extends ConsumerStatefulWidget {
   final VoidCallback? onComposeTapped;
   final VoidCallback? onChannelsTapped;
   final VoidCallback? onVaultTapped;
+  final VoidCallback? onContactsTapped;
 
   @override
   ConsumerState<_HomeBody> createState() => _HomeBodyState();
@@ -336,6 +345,9 @@ class _HomeBodyState extends ConsumerState<_HomeBody> {
           onVaultTap: widget.onVaultTapped == null
               ? null
               : () => widget.onVaultTapped!(),
+          onContactsTap: widget.onContactsTapped == null
+              ? null
+              : () => widget.onContactsTapped!(),
         ),
       ),
       bottomNavigationBar: _HomeTabBar(
@@ -391,6 +403,7 @@ class _HomeContent extends StatelessWidget {
     required this.onComposeTap,
     required this.onChannelsTap,
     required this.onVaultTap,
+    required this.onContactsTap,
   });
 
   final DeviceCapabilities capabilities;
@@ -402,6 +415,7 @@ class _HomeContent extends StatelessWidget {
   final VoidCallback? onComposeTap;
   final VoidCallback? onChannelsTap;
   final VoidCallback? onVaultTap;
+  final VoidCallback? onContactsTap;
 
   @override
   Widget build(BuildContext context) {
@@ -433,6 +447,7 @@ class _HomeContent extends StatelessWidget {
           onComposeTap: onComposeTap,
           onChannelsTap: onChannelsTap,
           onVaultTap: onVaultTap,
+          onContactsTap: onContactsTap,
         ),
       ],
     );
@@ -698,11 +713,13 @@ class _QuickActionGrid extends StatelessWidget {
     required this.onComposeTap,
     required this.onChannelsTap,
     required this.onVaultTap,
+    required this.onContactsTap,
   });
 
   final VoidCallback? onComposeTap;
   final VoidCallback? onChannelsTap;
   final VoidCallback? onVaultTap;
+  final VoidCallback? onContactsTap;
 
   @override
   Widget build(BuildContext context) {
@@ -714,6 +731,13 @@ class _QuickActionGrid extends StatelessWidget {
           icon: Icons.edit_outlined,
           onTap: onComposeTap,
           testKey: 'homeComposeButton',
+        ),
+        const SizedBox(height: 8),
+        _QuickActionButton(
+          label: 'Contacts',
+          icon: Icons.contacts_outlined,
+          onTap: onContactsTap,
+          testKey: 'homeContactsButton',
         ),
         const SizedBox(height: 8),
         _QuickActionButton(

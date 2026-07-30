@@ -16,6 +16,7 @@
 //   9. "Show my QR" dialog renders a QrImageView with the local label.
 //  10. Add-contact button invokes the optional callback.
 //  11. `deriveContactShortId` is stable and predictable.
+//  12. "Pair via invite" callback flows through the dialog → repo.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,6 +49,7 @@ void main() {
     required ContactsRepository repo,
     String myDeviceIdentityLabel = '0123456789abcdef',
     VoidCallback? onAddContactPressed,
+    PairInviteCallback? onPairViaInvite,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -55,6 +57,7 @@ void main() {
           repository: repo,
           myDeviceIdentityLabel: myDeviceIdentityLabel,
           onAddContactPressed: onAddContactPressed,
+          onPairViaInvite: onPairViaInvite,
         ),
       ),
     );
@@ -481,6 +484,163 @@ void main() {
       // Still on the contacts page.
       expect(find.byKey(const ValueKey<String>('contactsList')),
           findsOneWidget);
+    });
+  });
+
+  group('ContactsPage — Pair via invite', () {
+    testWidgets('empty state shows the Pair via invite button when wired',
+        (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      await pumpPage(
+        tester,
+        repo: repo,
+        onPairViaInvite: (token) async => null,
+      );
+
+      expect(
+        find.byKey(const ValueKey<String>('contactsEmptyPairInviteButton')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('empty state hides the Pair via invite button when unwired',
+        (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      await pumpPage(tester, repo: repo);
+      expect(
+        find.byKey(const ValueKey<String>('contactsEmptyPairInviteButton')),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+        'submitting a token invokes the callback and persists the contact',
+        (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      String? seenToken;
+      await pumpPage(
+        tester,
+        repo: repo,
+        onPairViaInvite: (token) async {
+          seenToken = token;
+          return PairInviteResult(
+            displayName: 'Charlie',
+            deviceId: '0123456789abcdef',
+            x25519PublicKey: null,
+          );
+        },
+      );
+
+      // Tap the app-bar pair-via-invite button (only visible when
+      // wired).
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteButton')));
+      await tester.pumpAndSettle();
+
+      // Dialog is visible.
+      expect(
+        find.byKey(const ValueKey<String>('contactsPairInviteDialog')),
+        findsOneWidget,
+      );
+
+      // Type a token and submit.
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('contactsPairInviteField')),
+        'relaylink-invite-v1:stub-token',
+      );
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteSubmitButton')));
+      await tester.pumpAndSettle();
+
+      expect(seenToken, 'relaylink-invite-v1:stub-token');
+
+      // Repo now has Charlie.
+      final list = await repo.list();
+      expect(list, hasLength(1));
+      expect(list.first.displayName, 'Charlie');
+      expect(list.first.id, '0123456789abcdef');
+    });
+
+    testWidgets('callback returning null shows a "not valid" snackbar',
+        (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      await pumpPage(
+        tester,
+        repo: repo,
+        onPairViaInvite: (token) async => null,
+      );
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteButton')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('contactsPairInviteField')),
+        'garbage',
+      );
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteSubmitButton')));
+      await tester.pumpAndSettle();
+      expect(find.text('Invite was not a valid contact invite'),
+          findsOneWidget);
+      expect(await repo.list(), isEmpty);
+    });
+
+    testWidgets('callback throwing shows the error message',
+        (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      await pumpPage(
+        tester,
+        repo: repo,
+        onPairViaInvite: (token) async {
+          throw StateError('crypto blew up');
+        },
+      );
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteButton')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('contactsPairInviteField')),
+        'relaylink-invite-v1:abc',
+      );
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteSubmitButton')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Pair failed'), findsOneWidget);
+      expect(await repo.list(), isEmpty);
+    });
+
+    testWidgets('cancel closes the dialog without calling the callback',
+        (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      var calls = 0;
+      await pumpPage(
+        tester,
+        repo: repo,
+        onPairViaInvite: (token) async {
+          calls++;
+          return null;
+        },
+      );
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteButton')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(
+          const ValueKey<String>('contactsPairInviteCancelButton')));
+      await tester.pumpAndSettle();
+      expect(calls, 0);
+      expect(
+        find.byKey(const ValueKey<String>('contactsPairInviteDialog')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('when the callback is not wired the app-bar button is '
+        'disabled', (WidgetTester tester) async {
+      final repo = InMemoryContactsRepository(<Contact>[]);
+      await pumpPage(tester, repo: repo);
+      final IconButton btn = tester.widget(
+        find.byKey(const ValueKey<String>('contactsPairInviteButton')),
+      );
+      expect(btn.onPressed, isNull);
     });
   });
 }

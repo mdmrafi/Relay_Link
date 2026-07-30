@@ -13,6 +13,7 @@
 // singletons everywhere.
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -21,8 +22,15 @@ import 'package:relaylink/alerts/allowlist.dart';
 import 'package:relaylink/app/bootstrap.dart';
 import 'package:relaylink/capabilities/detect.dart';
 import 'package:relaylink/capabilities/observer.dart';
+import 'package:relaylink/contacts/contact.dart';
+import 'package:relaylink/contacts/contacts_lookup.dart';
+import 'package:relaylink/contacts/repository_contacts_lookup.dart';
+import 'package:relaylink/crypto/contact_invite.dart';
 import 'package:relaylink/screens/capability_disclosure.dart';
+import 'package:relaylink/screens/contacts.dart';
 import 'package:relaylink/screens/home.dart';
+import 'package:relaylink/screens/remote_chat_controller.dart';
+
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -190,11 +198,141 @@ class _DisclosureOverlayHomeState extends State<_DisclosureOverlayHome> {
   }
 }
 
-class RelayLinkHome extends StatelessWidget {
+class RelayLinkHome extends ConsumerWidget {
   const RelayLinkHome({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return const HomeScreen();
+  Widget build(BuildContext context, WidgetRef ref) {
+    return HomeScreen(
+      onContactsTapped: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const _ProductionContactsScreen(),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Production contacts screen: a `ContactsPage` whose repository is
+/// backed by the bootstrap's `LocalDb` (read-through cache). Wires the
+/// `onPairViaInvite` callback to the bootstrap's
+/// `RemoteChatController` + `RepositoryContactsLookup`.
+class _ProductionContactsScreen extends ConsumerWidget {
+  const _ProductionContactsScreen();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final bootstrap = ref.watch(bootstrapResultProvider);
+    final identity = ref.watch(deviceIdentityProvider);
+    return ContactsPage(
+      repository: _ProductionContactsRepository(
+        contactsLookup: bootstrap.contactsLookup,
+      ),
+      myDeviceIdentityLabel: identity.senderId,
+      onPairViaInvite: (token) async {
+        // Decode the invite, bootstrap a DirectSession, upsert the
+        // resulting ContactRecord, and report back what was paired.
+        // Any decode / crypto failure surfaces as a thrown exception
+        // which the dialog catches and shows as an error snackbar.
+        final invite = ContactInviteCodec.decode(token);
+        final session = await RemoteChatController.pairWithInviteStatic(
+          identity: identity,
+          invite: invite,
+          isInitiator: true,
+        );
+        await bootstrap.directSessionStore.put(invite.deviceId, session);
+        final record = ContactRecord(
+          deviceId: invite.deviceId,
+          displayName: invite.displayName,
+          x25519PublicKey: invite.x25519PublicKey,
+          phoneNumber: null,
+        );
+        await bootstrap.contactsLookup.upsert(record);
+        return PairInviteResult(
+          displayName: invite.displayName,
+          deviceId: invite.deviceId,
+          x25519PublicKey: invite.x25519PublicKey,
+        );
+      },
+    );
+  }
+}
+
+/// `ContactsRepository` that bridges the bootstrap's
+/// `RepositoryContactsLookup` into the simple `Contact` model the
+/// ContactsPage expects (Ticket #40). The widget's persistence surface
+/// uses `Contact` (id, displayName, publicKey, phoneNumber); the
+/// production model uses `ContactRecord` (deviceId, x25519PublicKey).
+/// We map between the two.
+class _ProductionContactsRepository implements ContactsRepository {
+  _ProductionContactsRepository({
+    required this.contactsLookup,
+  });
+
+  final RepositoryContactsLookup contactsLookup;
+
+  Contact _toContact(ContactRecord r) {
+    return Contact(
+      id: r.deviceId,
+      displayName: r.displayName,
+      publicKey: r.x25519PublicKey == null
+          ? ''
+          : r.x25519PublicKey!
+              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+              .join(),
+      phoneNumber: r.phoneNumber,
+    );
+  }
+
+  ContactRecord _toRecord(Contact c) {
+    final pk = c.publicKey.isEmpty
+        ? null
+        : Uint8List.fromList(<int>[
+            for (var i = 0; i < c.publicKey.length; i += 2)
+              int.parse(c.publicKey.substring(i, i + 2), radix: 16),
+          ]);
+    return ContactRecord(
+      deviceId: c.id,
+      displayName: c.displayName,
+      x25519PublicKey: pk,
+      phoneNumber: c.phoneNumber,
+    );
+  }
+
+  @override
+  Future<List<Contact>> list() async {
+    final records = await contactsLookup.list();
+    return records.map(_toContact).toList(growable: false);
+  }
+
+  @override
+  Future<void> save(Contact contact) async {
+    await contactsLookup.upsert(_toRecord(contact));
+  }
+
+  @override
+  Future<Contact?> updateDetails({
+    required String id,
+    String? displayName,
+    String? phoneNumber,
+  }) async {
+    final existing = await contactsLookup.lookupByDeviceIdAsync(id);
+    if (existing == null) return null;
+    final updated = ContactRecord(
+      deviceId: existing.deviceId,
+      displayName: displayName ?? existing.displayName,
+      x25519PublicKey: existing.x25519PublicKey,
+      phoneNumber: phoneNumber ?? existing.phoneNumber,
+    );
+    await contactsLookup.upsert(updated);
+    return _toContact(updated);
+  }
+
+  @override
+  Future<bool> remove(String id) async {
+    final n = await contactsLookup.delete(id);
+    return n > 0;
   }
 }
