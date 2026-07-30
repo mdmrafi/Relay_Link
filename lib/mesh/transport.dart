@@ -1,92 +1,158 @@
-// RelayLink — Minimal MeshTransport (Ticket #08 minimal compatible stub).
+// RelayLink — MeshTransport (Ticket #08 against Ticket #07 discovery).
 //
-// This file implements a minimal, in-memory `MeshTransport` that satisfies
-// the `Transport` contract from `lib/transport/transport.dart` for the
-// purposes of the Gateway relay (Ticket #22). The real Ticket #08
-// implementation will replace this with a Nearby-Connections /
-// Multipeer-Connectivity backed transport.
+// Real `Transport` implementation backed by Ticket #07's `MeshDiscovery`
+// (which wraps the underlying BLE radio via `MeshDiscoveryPlatform`).
 //
-// CONTRACT (a subset of Ticket #08's contract):
-//   * `send(msg)` — in-memory, simply stores the message in a per-instance
-//     outbox stream. The real implementation will JSON-encode and ship over
-//     BLE.
-//   * `incoming` — a broadcast stream of messages that have been "received"
-//     from the (mock) peer radio. The Gateway relay subscribes to this.
-//   * `isAvailable()` — true once at least one "peer" has been simulated
-//     via `simulateIncoming`. The real impl checks Bluetooth radio state.
-//   * `simulateIncoming(msg)` — test/dev hook: pretend a peer radio just
-//     gave us this message.
-//   * `simulateOutgoing(msg)` — test/dev hook: return the last message that
-//     was sent so tests can assert what the relay pushed back into mesh.
+// WIRE FORMAT
+// ===========
+// `send(msg)` UTF-8 JSON-encodes the message via `Message.toJson()` and
+// calls `MeshDiscoveryPlatform.sendPayload` for every connected peer
+// surfaced by `MeshDiscovery.currentPeers`. The wire bytes are the
+// exact bytes the discovery module already understands, so the
+// platform plugin's `MeshPlatformPayload` handler (see
+// `lib/mesh/discovery.dart`) decodes them via the same
+// `MeshDiscovery.tryDecodeMessage` helper.
 //
-// The relay layer does NOT depend on the real Bluetooth stack — it only
-// depends on the abstract `Transport` interface above. Switching to the
-// real Ticket #08 mesh transport is a single-line change in the app
-// bootstrap.
+// AVAILABILITY
+// ============
+// `isAvailable()` is true iff the BLE radio is powered on AND
+// permissions are granted AND at least one peer is currently in the
+// connected set. Legacy test fixtures that flip
+// `setSimulatedPeerConnected(true)` continue to drive the transport
+// without standing up a real radio.
 
 import 'dart:async';
 
 import '../models/message.dart';
 import '../transport/transport.dart';
+import 'discovery.dart';
 
-/// Minimal in-memory mesh transport. Used by the Gateway relay's tests
-/// and as a placeholder for the real Bluetooth-backed mesh.
+/// Transport adapter that fans out raw Message JSON through Ticket #07's
+/// [MeshDiscoveryPlatform] while preserving the legacy relay test hooks.
 class MeshTransport implements Transport {
-  @override
-  final String name = 'mesh';
+  /// Construct a transport wired to the supplied discovery. Production
+  /// code passes a `MeshDiscovery` whose platform is the real BLE
+  /// plugin; tests inject a fake platform (see
+  /// `test/mesh/transport_test.dart`).
+  MeshTransport({MeshDiscovery? discovery})
+      : _discovery = discovery ?? MeshDiscovery();
 
-  /// Whether the simulated mesh has at least one connected peer.
-  /// In real Ticket #08 this is "Bluetooth radio on AND permission granted
-  /// AND at least one service active".
-  bool _simulatedPeerConnected = false;
+  /// The discovery seam we broadcast on and listen to.
+  final MeshDiscovery _discovery;
 
-  /// Outgoing messages "the device" has sent. Useful for tests.
+  /// Outgoing messages this transport has sent. Surfaced via the
+  /// `simulatedOutgoing` getter for the legacy Gateway relay tests.
   final List<Message> _outgoing = <Message>[];
 
-  /// Broadcast stream of incoming messages.
+  /// Legacy knob: when `true`, `isAvailable()` returns true even if no
+  /// real peer is connected. The Gateway relay tests rely on this to
+  /// flip availability before injecting messages via `simulateIncoming`.
+  bool _simulatedPeerConnected = false;
+
+  /// Subscription to the discovery's decoded message stream. Forwards
+  /// every inbound `Message` onto our own `incoming` broadcast stream
+  /// so consumers of this transport don't have to know about the
+  /// discovery seam.
+  StreamSubscription<Message>? _incomingSub;
+
+  /// Broadcast controller for the Transport-facing `incoming` stream.
   final StreamController<Message> _incomingController =
       StreamController<Message>.broadcast();
 
-  /// Whether the mesh transport is currently usable.
   @override
-  bool isAvailable() => _simulatedPeerConnected;
+  String get name => 'mesh';
 
-  /// Connect / disconnect the simulated peer radio. Production code in
-  /// Ticket #08 will replace this with platform-event state.
-  void setSimulatedPeerConnected(bool connected) {
-    _simulatedPeerConnected = connected;
-  }
+  /// Underlying discovery seam. Exposed for advanced tests and for the
+  /// app bootstrap to start/stop the radio.
+  MeshDiscovery get discovery => _discovery;
 
-  /// Send a message "over the mesh". In this stub, the message is captured
-  /// for tests and an error is thrown if the mesh is unavailable.
-  @override
-  Future<void> send(Message msg) async {
-    if (!isAvailable()) {
-      throw TransportUnavailableException(name);
-    }
-    _outgoing.add(msg);
-  }
-
-  /// Broadcast stream of incoming messages.
   @override
   Stream<Message> get incoming => _incomingController.stream;
 
-  /// Test/dev hook: inject a message as if it had just been received from
-  /// a peer radio. The receiver (e.g. the Gateway relay) sees it on
-  /// [incoming].
-  void simulateIncoming(Message msg) {
-    if (_incomingController.isClosed) return;
-    _incomingController.add(msg);
+  @override
+  bool isAvailable() {
+    if (_simulatedPeerConnected) return true;
+    return _discovery.platform.isBluetoothEnabled &&
+        _discovery.platform.hasPermissions &&
+        _connectedPeerIds.isNotEmpty;
   }
 
-  /// Test/dev hook: list all messages sent via [send]. Most-recent last.
-  List<Message> get simulatedOutgoing => List<Message>.unmodifiable(_outgoing);
+  /// Snapshot of peer ids currently in the connected state.
+  Set<String> get _connectedPeerIds => _discovery.currentPeers
+      .where((peer) => peer.status == PeerStatus.connected)
+      .map((peer) => peer.id)
+      .toSet();
 
-  /// Free resources. Calling this will close [incoming] so any subscribers
-  /// complete.
+  @override
+  Future<void> send(Message msg) async {
+    if (!isAvailable()) throw TransportUnavailableException(name);
+
+    // Track every message we send before fan-out so even a partially-
+    // failing broadcast still leaves a trace (legacy hook).
+    _outgoing.add(msg);
+
+    final peerIds = _connectedPeerIds;
+    if (peerIds.isEmpty && _simulatedPeerConnected) return;
+    if (peerIds.isEmpty) throw TransportUnavailableException(name);
+
+    final bytes = MeshDiscovery.encodeMessage(msg);
+    Object? firstError;
+    for (final peerId in peerIds) {
+      try {
+        await _discovery.platform.sendPayload(peerId, bytes);
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError != null) throw firstError;
+  }
+
+  /// Wire `discovery.incoming` into our own broadcast stream. Idempotent.
+  void wireIncoming() {
+    _incomingSub ??= _discovery.incoming.listen((message) {
+      if (!_incomingController.isClosed) _incomingController.add(message);
+    });
+  }
+
+  /// Power the radio on (idempotent).
+  Future<void> startRadio() => _discovery.start();
+
+  /// Power the radio off (idempotent).
+  Future<void> stopRadio() => _discovery.stop();
+
   Future<void> dispose() async {
+    await _incomingSub?.cancel();
+    _incomingSub = null;
     if (!_incomingController.isClosed) {
       await _incomingController.close();
     }
   }
+
+  /// Synchronous tear-down for tests that don't want to await `dispose`.
+  void disposeSync() {
+    _incomingSub?.cancel();
+    _incomingSub = null;
+    if (!_incomingController.isClosed) {
+      unawaited(_incomingController.close());
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Legacy test hooks (preserved for Gateway relay tests).
+  // ---------------------------------------------------------------------
+
+  /// Drive [isAvailable] directly. Production code never calls this.
+  void setSimulatedPeerConnected(bool connected) {
+    _simulatedPeerConnected = connected;
+  }
+
+  /// Inject a message onto `incoming` as if it had just been received
+  /// from the radio.
+  void simulateIncoming(Message msg) {
+    if (!_incomingController.isClosed) _incomingController.add(msg);
+  }
+
+  /// Read-only view of every message this transport has sent via `send`.
+  List<Message> get simulatedOutgoing =>
+      List<Message>.unmodifiable(_outgoing);
 }
