@@ -1,9 +1,16 @@
 // RelayLink — Ticket #01 scaffold home screen + #30 capability disclosure
-// gate + #38 home screen.
+// gate + #38 home screen + wiring-gap-closure bootstrap injection.
 //
 // `RelayLinkHome` renders the real home screen from `lib/screens/home.dart`
 // once the first-launch capability disclosure has been dismissed. The
 // older placeholder (Ticket #01) is gone; #38 owns the surface.
+//
+// The wiring-gap-closure plan (commit history: feat/wired-bootstrap)
+// introduces `bootstrapServices` in `lib/app/bootstrap.dart`. This
+// `main()` calls it once, then injects the resulting `BootstrapResult`
+// into a top-level `ProviderScope` override so the rest of the app can
+// `ref.watch(bootstrapResultProvider)` instead of re-initialising
+// singletons everywhere.
 
 import 'dart:async';
 
@@ -11,25 +18,33 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:relaylink/alerts/allowlist.dart';
+import 'package:relaylink/app/bootstrap.dart';
 import 'package:relaylink/capabilities/detect.dart';
 import 'package:relaylink/capabilities/observer.dart';
-import 'package:relaylink/channels/keys.dart';
 import 'package:relaylink/screens/capability_disclosure.dart';
 import 'package:relaylink/screens/home.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Ticket #15: ensure the public channel key is registered before any
-  // broadcast crypto (#03) runs. Safe to call repeatedly.
-  final keyStore = await ChannelKeyStore.instance();
-  await keyStore.init();
+  // Build every long-lived singleton exactly once at boot. This includes
+  // LocalDb, DeviceIdentity, TransportManager (+ mesh/sms/internet
+  // transports), DirectSessionStore, BroadcastCrypto, the production
+  // ContactsLookup, and the production RemoteChatController.
+  final bootstrap = await bootstrapServices();
   // Ticket #36: warm the verified-orgs allowlist cache (read from disk,
   // refresh from Firestore if stale). Fire-and-forget — the app must NOT
   // block on this. Receivers fall back to the bundled
   // `assets/verified_orgs.json` allowlist from #35 if the cache is empty
   // (e.g. on a cold offline launch).
   unawaited(VerifiedOrgsCache().init());
-  runApp(const RelayLinkApp());
+  runApp(
+    ProviderScope(
+      overrides: [
+        bootstrapResultProvider.overrideWithValue(bootstrap),
+      ],
+      child: const RelayLinkApp(),
+    ),
+  );
 }
 
 class RelayLinkApp extends StatelessWidget {
@@ -55,7 +70,7 @@ class RelayLinkApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const ProviderScope(child: _FirstLaunchGate()),
+      home: const _FirstLaunchGate(),
     );
   }
 }
@@ -117,10 +132,10 @@ class _FirstLaunchGateState extends State<_FirstLaunchGate> {
   }
 }
 
-// `ProviderScope` is mounted higher up in the widget tree
-// (RelayLinkApp.build above). `_DisclosureOverlayHome` creates a nested
-// scope with the latest device-capability override so downstream consumers
-// such as `HomeScreen` remain purely declarative.
+// `ProviderScope` is mounted higher up in `main()`.
+// `_DisclosureOverlayHome` creates a nested scope with the latest
+// device-capability override so downstream consumers such as `HomeScreen`
+// remain purely declarative.
 
 /// Renders the home page, and overlays the first-launch disclosure if the
 /// user has not yet seen it. Once the overlay is shown, the home page is
