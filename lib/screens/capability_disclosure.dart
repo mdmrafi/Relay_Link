@@ -15,11 +15,21 @@
 // when the device is iOS and at least one SMS feature is unavailable; the
 // per-feature reason text is sourced from `DeviceCapabilities` so this
 // widget stays in sync with #29.
+//
+// LIVE STATE (Ticket #10 cut #10): the disclosure now shows the LIVE gate
+// state per feature, not the one-shot snapshot from `detectCapabilities()`.
+// Each row is wrapped in a `StreamBuilder<CapabilityEvent>` keyed on the
+// relevant `CapabilityGateKind` so a permission revoke or a peer
+// disappearing reflects in the UI immediately. The platform (Android / iOS)
+// and the platform-fixed rows (smsSend on iOS) still come from the static
+// `DeviceCapabilities` snapshot because they do not change at runtime.
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:relaylink/capabilities/detect.dart';
+import 'package:relaylink/capabilities/timeline.dart';
 
 /// SharedPreferences key for the "first-launch disclosure seen" flag.
 ///
@@ -51,6 +61,51 @@ Future<bool> hasSeenCapabilityDisclosure() async {
 Future<void> markCapabilityDisclosureSeen() async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setBool(kCapabilityDisclosureSeenPrefKey, true);
+}
+
+/// One live disclosure row.
+///
+/// Renders the static `DeviceCapabilities` snapshot (label + base availability
+/// + reason on iOS), but the final `available` flag is OVERRIDDEN by the
+/// most recent timeline event for the matching gate. Before any update
+/// arrives, the static snapshot is used so the UI is never empty.
+class _LiveRow extends ConsumerWidget {
+  const _LiveRow({
+    required this.label,
+    required this.staticCapability,
+    required this.gateKind,
+  });
+
+  final String label;
+  final FeatureCapability staticCapability;
+  final CapabilityGateKind gateKind;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return StreamBuilder<CapabilityEvent>(
+      // We key on the gate kind so unrelated transitions don't rebuild
+      // every row. Each gate's events stream is broadcast so subscription
+      // is cheap.
+      key: ValueKey<String>('liveRow::$gateKind'),
+      stream: CapabilityTimeline.instance().events
+          .where((e) => e.gate == gateKind),
+      initialData: null,
+      builder: (BuildContext context,
+          AsyncSnapshot<CapabilityEvent> snapshot) {
+        // If no live event has arrived yet, fall back to the static snapshot.
+        final live = snapshot.data;
+        final available = live?.available ?? staticCapability.available;
+        final reason = live?.reason.isNotEmpty == true
+            ? live!.reason
+            : staticCapability.reason;
+        final cap = FeatureCapability(
+          available: available,
+          reason: available ? '' : reason,
+        );
+        return _CapabilityRow(label: label, capability: cap);
+      },
+    );
+  }
 }
 
 /// Single row of the disclosure: a feature label, a leading ✓/✗ icon, and a
@@ -106,7 +161,7 @@ class _CapabilityRow extends StatelessWidget {
 ///   - `mode: CapabilityDisclosureMode.settingsAbout` — shows a "Close"
 ///     button that pops without touching the seen flag.
 ///
-/// Both modes render the same capability list.
+/// Both modes render the same capability list, with live state.
 enum CapabilityDisclosureMode { firstLaunch, settingsAbout }
 
 /// The disclosure page widget. Use [buildCapabilityDisclosureRoute] below
@@ -186,41 +241,51 @@ class CapabilityDisclosurePage extends StatelessWidget {
                         ),
                       ),
                     const Divider(height: 1),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'Bluetooth mesh send/receive',
-                      capability: capabilities.bluetoothMeshSend,
+                      staticCapability: capabilities.bluetoothMeshSend,
+                      gateKind: CapabilityGateKind.mesh,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'Bluetooth mesh discovery',
-                      capability: capabilities.bluetoothMeshDiscover,
+                      staticCapability: capabilities.bluetoothMeshDiscover,
+                      gateKind: CapabilityGateKind.mesh,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'Multi-hop store-and-forward relay',
-                      capability: capabilities.multiHopRelay,
+                      staticCapability: capabilities.multiHopRelay,
+                      gateKind: CapabilityGateKind.mesh,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'SMS send',
-                      capability: capabilities.smsSend,
+                      staticCapability: capabilities.smsSend,
+                      gateKind: CapabilityGateKind.sms,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'SMS receive',
-                      capability: capabilities.smsReceive,
+                      staticCapability: capabilities.smsReceive,
+                      gateKind: CapabilityGateKind.sms,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'Internet (cloud relay)',
-                      capability: capabilities.internet,
+                      staticCapability: capabilities.internet,
+                      gateKind: CapabilityGateKind.internet,
                     ),
+                    // ALERT verification is local and does not have a gate —
+                    // its static snapshot is the source of truth.
                     _CapabilityRow(
                       label: 'ALERT verification (signature check)',
                       capability: capabilities.alertVerification,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'Evidence Vault (capture)',
-                      capability: capabilities.vaultCapture,
+                      staticCapability: capabilities.vaultCapture,
+                      gateKind: CapabilityGateKind.vault,
                     ),
-                    _CapabilityRow(
+                    _LiveRow(
                       label: 'Evidence Vault (send-on-connect)',
-                      capability: capabilities.vaultSendOnConnect,
+                      staticCapability: capabilities.vaultSendOnConnect,
+                      gateKind: CapabilityGateKind.channel,
                     ),
                   ],
                 ),
