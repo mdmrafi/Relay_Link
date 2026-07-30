@@ -18,6 +18,7 @@ abstract class RelayStrategy {
   /// or null if the message was dropped (seen-cache hit or TTL=0).
   Message? onIncoming({
     required String peerId,
+    required String localDeviceId,
     required Message msg,
     required BloomFilter seenCache,
   });

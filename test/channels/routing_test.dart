@@ -161,13 +161,13 @@ void main() {
   group('ChannelRouter integration', () {
     late FakeMembership membership;
     late ChannelSeenCache seen;
-    late LoopbackTransport transport;
+    late EchoTransport transport;
     late ChannelRouter router;
 
     setUp(() {
       membership = FakeMembership();
       seen = ChannelSeenCache();
-      transport = LoopbackTransport(name: 'mesh', available: true);
+      transport = EchoTransport(name: 'mesh', available: true);
       router = ChannelRouter(ChannelRouterConfig(
         localDeviceId: 'me',
         transports: <Transport>[transport],
@@ -325,7 +325,7 @@ void main() {
     });
 
     test('multiple transports: fan-out on relay', () async {
-      final t2 = LoopbackTransport(name: 'sms', available: true);
+      final t2 = EchoTransport(name: 'sms', available: true);
       addTearDown(t2.close);
       // Fresh seen-cache so router2 isn't shadowed by router's
       // pre-existing seen entries from the shared transport's stream.
@@ -357,7 +357,7 @@ void main() {
     });
 
     test('unavailable transport is skipped on relay (no throw)', () async {
-      final tDown = LoopbackTransport(name: 'sms', available: false);
+      final tDown = EchoTransport(name: 'sms', available: false);
       addTearDown(tDown.close);
       final router2Seen = ChannelSeenCache();
       final router2 = ChannelRouter(ChannelRouterConfig(
@@ -416,7 +416,7 @@ void main() {
     test('start is idempotent', () {
       final membership = FakeMembership();
       final seen = ChannelSeenCache();
-      final t = LoopbackTransport();
+      final t = EchoTransport();
       addTearDown(t.close);
       final r = ChannelRouter(ChannelRouterConfig(
         localDeviceId: 'me',
@@ -433,7 +433,7 @@ void main() {
     test('stop is idempotent and clears subscriptions', () async {
       final membership = FakeMembership();
       final seen = ChannelSeenCache();
-      final t = LoopbackTransport();
+      final t = EchoTransport();
       addTearDown(t.close);
       final r = ChannelRouter(ChannelRouterConfig(
         localDeviceId: 'me',
@@ -451,7 +451,7 @@ void main() {
       final membership = FakeMembership();
       membership.join('public', _key(1));
       final seen = ChannelSeenCache();
-      final t = LoopbackTransport();
+      final t = EchoTransport();
       addTearDown(t.close);
       final r = ChannelRouter(ChannelRouterConfig(
         localDeviceId: 'me',
@@ -496,8 +496,8 @@ void main() {
       // physical Transport instance is passed to both routers — that
       // is how a "shared radio" is modeled in this codebase's relay
       // tests (the two devices "see" the same bytes).
-      final abLink = LoopbackTransport(name: 'meshA-B', available: true);
-      final bcLink = LoopbackTransport(name: 'meshB-C', available: true);
+      final abLink = EchoTransport(name: 'meshA-B', available: true);
+      final bcLink = EchoTransport(name: 'meshB-C', available: true);
       addTearDown(abLink.close);
       addTearDown(bcLink.close);
 
@@ -617,7 +617,7 @@ class _ThrowyTransport implements Transport {
     sendAttempts++;
     throw StateError('simulated transport failure');
   }
-  /// Convenience alias for parity with [LoopbackTransport]'s
+  /// Convenience alias for parity with [EchoTransport]'s
   /// `simulatedOutgoing` getter — this transport records zero
   /// successful sends by design.
   List<Message> get simulatedOutgoing => const <Message>[];

@@ -6,7 +6,7 @@ mesh layer at scale before deploying to physical hardware.
 ## What it does
 
 Spawns `N` device peers in a single Dart process. Each peer has its own
-`LoopbackTransport` (the production `Transport` contract), its own
+`EchoTransport` (the production `Transport` contract), its own
 `BloomFilter` seen-cache, and a tiny relay layer that mirrors the
 production mesh relay:
 
@@ -141,7 +141,7 @@ test/scale/results/
 
 ## Design notes
 
-- The harness uses `LoopbackTransport` from `lib/transport/transport.dart`
+- The harness uses `EchoTransport` from `lib/transport/transport.dart`
   rather than the real mesh (which is on the Ticket #08 plan). The
   Transport contract is identical; only the "radio" is in-process.
 - The discovery layer (`loopback_mesh_discovery.dart`) is a tiny
@@ -160,7 +160,7 @@ latency or real-world packet loss. When running on physical hardware
 the user can:
 
 1. Wire each peer to a real device (phone + SIM + adapter).
-2. Replace `LoopbackTransport` with `MeshTransport` (or the eventual
+2. Replace `EchoTransport` with `MeshTransport` (or the eventual
    Ticket #08 transport) — the `Transport` contract is unchanged.
 3. Run the same scenarios against the real mesh.
 

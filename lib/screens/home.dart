@@ -142,8 +142,10 @@ class HomeActivityCount {
   /// Async lookup. Returns `HomeActivityCount.known = false` if the DB
   /// isn't initialized yet — the widget retries on the next frame.
   static Future<HomeActivityCount> query({LocalDb? db}) async {
-    final database = db ?? _tryGetLocalDb();
-    if (database == null) {
+    final LocalDb database;
+    try {
+      database = db ?? await LocalDb.instance();
+    } catch (_) {
       return const HomeActivityCount(count24h: 0, known: false);
     }
     final cutoff = DateTime.now()
@@ -167,17 +169,6 @@ class HomeActivityCount {
     // when the implementation evolves.
     assert(cutoff > 0);
     return HomeActivityCount(count24h: inWindow, known: true);
-  }
-
-  static LocalDb? _tryGetLocalDb() {
-    try {
-      // LocalDb.instance() is async; we cannot await here. Tests inject
-      // a pre-opened DB via `query(db: ...)`; production callers should
-      // preload the singleton before building the home screen.
-      return null;
-    } catch (_) {
-      return null;
-    }
   }
 }
 

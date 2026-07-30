@@ -32,6 +32,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:relaylink/alerts/allowlist.dart';
@@ -590,7 +591,8 @@ String _decodeBody(Uint8List payload) {
   if (payload.isEmpty) return '';
   try {
     return utf8.decode(payload, allowMalformed: true);
-  } catch (_) {
+  } catch (e, st) {
+    debugPrint('chat history load failed: $e\n$st');
     // Fall back to a printable representation if the bytes aren't valid UTF-8.
     return payload.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
   }

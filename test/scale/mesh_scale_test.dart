@@ -1,7 +1,7 @@
 // RelayLink — Scale-testing harness for 10+ device mesh simulation.
 //
 // This file spawns N in-process "device peers", each with its own
-// LoopbackTransport (Transport contract) and a BloomFilter-based seen-
+// EchoTransport (Transport contract) and a BloomFilter-based seen-
 // cache. A small in-test relay layer mirrors the production mesh relay:
 // it listens on `incoming`, dedupes via the seen-cache, decrements TTL,
 // and re-broadcasts via the in-process `LoopbackMeshDiscovery`. The
@@ -156,7 +156,7 @@ class _Peer {
   });
 
   final String peerId;
-  final LoopbackTransport transport;
+  final EchoTransport transport;
   final BloomFilter bloom;
   final LoopbackMeshDiscovery discovery;
 
@@ -218,6 +218,7 @@ class _Peer {
     try {
       final result = strategy.onIncoming(
         peerId: peerId,
+        localDeviceId: peerId,
         msg: raw,
         seenCache: bloom,
       );
@@ -636,7 +637,7 @@ class _Harness {
   late final RelayStrategy strategy;
 
   /// Build peers and wire them into the discovery layer. Each peer gets
-  /// a fresh BloomFilter, a per-peer LoopbackTransport, and the
+  /// a fresh BloomFilter, a per-peer EchoTransport, and the
   /// discovery's broadcast path is configured to deliver into the
   /// peer's transport.
   Future<void> bootstrap() async {
@@ -646,7 +647,7 @@ class _Harness {
       // TTL = log2(N) + 1 so the broadcast storm finishes in a bounded
       // number of hops even with the fully-connected topology.
       final ttl = _ttlFor(peerCount);
-      final transport = LoopbackTransport(name: id);
+      final transport = EchoTransport(name: id);
       final bloom = BloomFilter.empty();
 
       final peer = _Peer(
@@ -1247,7 +1248,7 @@ void main() {
           deliveryLatency: Duration.zero,
           jitter: Duration.zero,
         );
-        final transport = LoopbackTransport(name: 'wire-peer');
+        final transport = EchoTransport(name: 'wire-peer');
         final bloom = BloomFilter.empty();
         final fakeStrategy = _RecordingRelayStrategy();
 
@@ -1353,7 +1354,7 @@ void main() {
           deliveryLatency: Duration.zero,
           jitter: Duration.zero,
         );
-        final transport = LoopbackTransport(name: 'peer-throws');
+        final transport = EchoTransport(name: 'peer-throws');
         final throwingStrategy = _ThrowingRelayStrategy();
 
         final peer = _Peer(
@@ -1411,6 +1412,7 @@ class _RecordingRelayStrategy implements RelayStrategy {
   @override
   Message? onIncoming({
     required String peerId,
+    required String localDeviceId,
     required Message msg,
     required BloomFilter seenCache,
   }) {
@@ -1435,6 +1437,7 @@ class _ThrowingRelayStrategy implements RelayStrategy {
   @override
   Message? onIncoming({
     required String peerId,
+    required String localDeviceId,
     required Message msg,
     required BloomFilter seenCache,
   }) {

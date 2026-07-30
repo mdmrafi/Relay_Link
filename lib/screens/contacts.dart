@@ -178,6 +178,7 @@ class _ContactsPageState extends State<ContactsPage> {
       context: context,
       builder: (BuildContext ctx) => _ContactQrDialog(contact: contact),
     );
+    if (!mounted) return;
   }
 
   /// Long-press handler — bottom sheet with management actions.
@@ -201,6 +202,7 @@ class _ContactsPageState extends State<ContactsPage> {
         },
       ),
     );
+    if (!mounted) return;
   }
 
   Future<void> _editContact(Contact contact) async {
@@ -381,8 +383,11 @@ class _ContactRow extends StatelessWidget {
         : '$shortId…  •  $keyLen-char key';
     return ListTile(
       key: ValueKey<String>('contactRow::${contact.id}'),
-      leading: CircleAvatar(
-        child: Text(_initials(contact.displayName)),
+      leading: Semantics(
+        label: 'Avatar for ${contact.displayName}',
+        child: CircleAvatar(
+          child: Text(_initials(contact.displayName)),
+        ),
       ),
       title: Text(
         title,
@@ -595,6 +600,7 @@ class _ContactEditDialogState extends State<_ContactEditDialog> {
   void _save() {
     final name = _name.text.trim();
     final phone = _phone.text.trim();
+    if (!mounted) return;
     Navigator.of(context).pop(
       _ContactEditResult(
         displayName: name,

@@ -21,9 +21,9 @@ Message _mkMessage({String id = 'msg-1'}) => Message.create(
     ).copyWith(id: id);
 
 void main() {
-  group('LoopbackTransport', () {
+  group('EchoTransport', () {
     test('round-trips a Message: send() appears on incoming', () async {
-      final transport = LoopbackTransport();
+      final transport = EchoTransport();
       final msg = _mkMessage();
       final received = transport.incoming.first;
       await transport.send(msg);
@@ -31,15 +31,15 @@ void main() {
       transport.close();
     });
 
-    test('default name is "loopback" and default isAvailable is true', () {
-      final transport = LoopbackTransport();
-      expect(transport.name, 'loopback');
+    test('default name is "echo" and default isAvailable is true', () {
+      final transport = EchoTransport();
+      expect(transport.name, 'echo');
       expect(transport.isAvailable(), isTrue);
       transport.close();
     });
 
     test('custom name and availability flag are honoured', () {
-      final transport = LoopbackTransport(name: 'test-loop', available: false);
+      final transport = EchoTransport(name: 'test-loop', available: false);
       expect(transport.name, 'test-loop');
       expect(transport.isAvailable(), isFalse);
       transport.close();
@@ -47,7 +47,7 @@ void main() {
 
     test('isAvailable() toggling mutates state without recreating the '
         'stream', () async {
-      final transport = LoopbackTransport();
+      final transport = EchoTransport();
       // Subscribe first, then toggle availability — the stream should
       // keep working.
       final completer = Completer<Message>();
@@ -64,9 +64,9 @@ void main() {
     });
   });
 
-  group('LoopbackTransport.incoming is broadcast', () {
+  group('EchoTransport.incoming is broadcast', () {
     test('multiple listeners all receive the same message', () async {
-      final transport = LoopbackTransport();
+      final transport = EchoTransport();
       final msg = _mkMessage();
 
       final f1 = transport.incoming.first;
@@ -85,7 +85,7 @@ void main() {
     });
 
     test('a late subscriber still receives subsequent messages', () async {
-      final transport = LoopbackTransport();
+      final transport = EchoTransport();
 
       // First subscriber drains its first event before we add the second.
       final firstReceived = transport.incoming.first;
@@ -105,8 +105,8 @@ void main() {
   group('TransportManager.register / unregister', () {
     test('register adds transports; unregister removes by identity', () {
       final manager = TransportManager();
-      final t1 = LoopbackTransport(name: 'one');
-      final t2 = LoopbackTransport(name: 'two');
+      final t1 = EchoTransport(name: 'one');
+      final t2 = EchoTransport(name: 'two');
       manager.register(t1);
       manager.register(t2);
       expect(manager.transports, [t1, t2]);
@@ -122,7 +122,7 @@ void main() {
 
     test('registering the same instance twice is a no-op', () {
       final manager = TransportManager();
-      final t = LoopbackTransport();
+      final t = EchoTransport();
       manager.register(t);
       manager.register(t);
       expect(manager.transports.length, 1);
@@ -131,8 +131,8 @@ void main() {
 
     test('transports list is unmodifiable', () {
       final manager = TransportManager();
-      manager.register(LoopbackTransport());
-      expect(() => manager.transports.add(LoopbackTransport()),
+      manager.register(EchoTransport());
+      expect(() => manager.transports.add(EchoTransport()),
           throwsUnsupportedError);
     });
   });
@@ -141,9 +141,9 @@ void main() {
     test('sends on all available transports, skipping unavailable ones',
         () async {
       final manager = TransportManager();
-      final availableA = LoopbackTransport(name: 'A');
-      final unavailable = LoopbackTransport(name: 'B', available: false);
-      final availableC = LoopbackTransport(name: 'C');
+      final availableA = EchoTransport(name: 'A');
+      final unavailable = EchoTransport(name: 'B', available: false);
+      final availableC = EchoTransport(name: 'C');
       manager
         ..register(availableA)
         ..register(unavailable)
@@ -178,7 +178,7 @@ void main() {
     test('does not block: a slow transport does not delay a fast one',
         () async {
       final manager = TransportManager();
-      final fast = LoopbackTransport(name: 'fast');
+      final fast = EchoTransport(name: 'fast');
       final slowCompleter = Completer<void>();
       final slow = _SlowLoopback(
         name: 'slow',
@@ -212,7 +212,7 @@ void main() {
 
     test('a failing transport does not fail the whole fan-out', () async {
       final manager = TransportManager();
-      final ok = LoopbackTransport(name: 'ok');
+      final ok = EchoTransport(name: 'ok');
       final bad = _FailingLoopback(name: 'bad', error: 'radio off');
       manager
         ..register(ok)

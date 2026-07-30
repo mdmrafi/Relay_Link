@@ -22,10 +22,18 @@
 
 import 'dart:convert';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 
 import 'package:relaylink/contacts/contacts_lookup.dart';
 import 'package:relaylink/vault/store.dart';
+
+/// Generic, user-facing message shown when decryption fails for any
+/// reason. The original exception is only logged via [debugPrint] so
+/// stack traces / key material never reach the UI.
+const String _kVaultDecryptErrorMessage =
+    'Could not decrypt — record may be tampered with or key unavailable';
 
 /// Possible recipient choices for a new capture. The compose screen renders
 /// one entry for each contact plus a "self" entry at the top — keeping the
@@ -362,7 +370,7 @@ class VaultViewScreen extends StatefulWidget {
 class _VaultViewScreenState extends State<VaultViewScreen> {
   String? _plaintext;
   bool _busy = false;
-  Object? _error;
+  String? _error;
 
   Future<void> _decrypt() async {
     if (_busy) return;
@@ -375,9 +383,23 @@ class _VaultViewScreenState extends State<VaultViewScreen> {
       setState(() {
         _plaintext = utf8.decode(bytes, allowMalformed: true);
       });
-    } catch (e) {
+    } on SecretBoxAuthenticationError catch (e, st) {
+      // Tampering or wrong key — never expose internals to the UI.
+      debugPrint('VaultView decrypt failed (auth): $e\n$st');
       setState(() {
-        _error = e;
+        _error = _kVaultDecryptErrorMessage;
+      });
+    } on FormatException catch (e, st) {
+      // Malformed blob (truncated / corrupt record shape).
+      debugPrint('VaultView decrypt failed (format): $e\n$st');
+      setState(() {
+        _error = _kVaultDecryptErrorMessage;
+      });
+    } on PlatformException catch (e, st) {
+      // Key unavailable (secure storage inaccessible, etc.).
+      debugPrint('VaultView decrypt failed (platform): $e\n$st');
+      setState(() {
+        _error = _kVaultDecryptErrorMessage;
       });
     } finally {
       if (mounted) {
@@ -420,7 +442,7 @@ class _VaultViewScreenState extends State<VaultViewScreen> {
                 ),
               if (_error != null)
                 Text(
-                  'Decryption failed: $_error',
+                  _error!,
                   style: TextStyle(
                     color: Theme.of(context).colorScheme.error,
                   ),

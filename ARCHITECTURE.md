@@ -20,7 +20,7 @@ lib/
 ├── channels/
 │   └── keys.dart              # ChannelKeyStore — 32-byte AES keys per channel (#15)
 ├── transport/                 # Carrier-agnostic abstraction (#06)
-│   ├── transport.dart         # Transport, TransportManager, LoopbackTransport
+│   ├── transport.dart         # Transport, TransportManager, EchoTransport
 │   └── internet.dart          # FirestoreGateway + InternetTransport (#22)
 ├── mesh/
 │   ├── bloom.dart             # Bloom filter helper

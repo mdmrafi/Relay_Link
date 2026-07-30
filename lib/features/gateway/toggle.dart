@@ -90,17 +90,27 @@ class GatewayEnabledNotifier extends StateNotifier<bool> {
   }
 
   /// Enable gateway mode and persist the new state.
+  ///
+  /// Persistence happens before the in-memory state is updated so that, if
+  /// the prefs write fails (or the process is killed before it completes),
+  /// the UI never reflects a state that isn't durably stored. On failure,
+  /// `state` is left untouched and the previous value remains the truth.
   Future<void> enable() async {
-    state = true;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kGatewayEnabledPrefKey, true);
+    state = true;
   }
 
   /// Disable gateway mode and persist the new state.
+  ///
+  /// Persistence happens before the in-memory state is updated so that, if
+  /// the prefs write fails (or the process is killed before it completes),
+  /// the UI never reflects a state that isn't durably stored. On failure,
+  /// `state` is left untouched and the previous value remains the truth.
   Future<void> disable() async {
-    state = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kGatewayEnabledPrefKey, false);
+    state = false;
   }
 
   /// Toggle the state, persisting the result. Used in places where the
@@ -153,18 +163,20 @@ class GatewayToggleTile extends ConsumerWidget {
       subtitle: const Text(kGatewayToggleSubtitle),
       secondary: const Icon(Icons.cell_tower),
       value: enabled,
-      onChanged: (_) => _onTap(context, ref, enabled),
+      // The provider is the source of truth, so we ignore `newValue` and
+      // re-read the current state inside `_onTap`.
+      onChanged: (_) => _onTap(context, ref),
     );
   }
 
-  /// Internal tap handler. Reads the latest state from the provider (don't
-  /// rely on the `enabled` parameter — the provider state is the source of
-  /// truth) and shows the appropriate confirmation flow.
+  /// Internal tap handler. Reads the latest state from the provider (the
+  /// provider is the single source of truth) and shows the appropriate
+  /// confirmation flow.
   Future<void> _onTap(
     BuildContext context,
     WidgetRef ref,
-    bool currentlyEnabled,
   ) async {
+    final currentlyEnabled = ref.read(gatewayEnabledProvider);
     final notifier = ref.read(gatewayEnabledProvider.notifier);
     if (currentlyEnabled) {
       final confirmed = await _showDisableDialog(context);

@@ -23,8 +23,8 @@ import 'mirror_relay_strategy.dart';
 void main() {
   group('MirrorRelayStrategy', () {
     late LoopbackMeshDiscovery discovery;
-    late LoopbackTransport tA;
-    late LoopbackTransport tB;
+    late EchoTransport tA;
+    late EchoTransport tB;
     late BloomFilter bloom;
 
     setUp(() {
@@ -32,8 +32,8 @@ void main() {
         deliveryLatency: Duration.zero,
         jitter: Duration.zero,
       );
-      tA = LoopbackTransport(name: 'peer-A');
-      tB = LoopbackTransport(name: 'peer-B');
+      tA = EchoTransport(name: 'peer-A');
+      tB = EchoTransport(name: 'peer-B');
       discovery.register('peer-A', (m) {
         if (tA.isAvailable()) tA.send(m);
       });
@@ -70,6 +70,7 @@ void main() {
         final sub = tB.incoming.listen(received.add);
         final first = strategy.onIncoming(
           peerId: 'peer-A',
+          localDeviceId: 'self-device',
           msg: msg,
           seenCache: bloom,
         );
@@ -88,6 +89,7 @@ void main() {
         final sub2 = tB.incoming.listen(receivedAfterDup.add);
         final second = strategy.onIncoming(
           peerId: 'peer-A',
+          localDeviceId: 'self-device',
           msg: msg,
           seenCache: bloom,
         );
@@ -116,6 +118,7 @@ void main() {
         final sub = tA.incoming.listen(received.add);
         final result = strategy.onIncoming(
           peerId: 'peer-A',
+          localDeviceId: 'self-device',
           msg: msg,
           seenCache: bloom,
         );
@@ -144,6 +147,7 @@ void main() {
         final sub = tA.incoming.listen((_) {});
         final result = strategy.onIncoming(
           peerId: 'peer-A',
+          localDeviceId: 'self-device',
           msg: msg,
           seenCache: bloom,
         );
@@ -156,6 +160,104 @@ void main() {
         // Identity: must be a copy, not the same instance.
         expect(identical(result, msg), isFalse);
         expect(result.id, msg.id);
+      },
+    );
+
+    test(
+      'onIncoming with self-originated message (senderId == localDeviceId) '
+      'does NOT broadcast, but still marks it seen',
+      () async {
+        final strategy = MirrorRelayStrategy(discovery: discovery);
+        final msg = Message.create(
+          mode: MessageMode.broadcast,
+          type: MessageType.chat,
+          channelId: 'public',
+          senderId: 'self-device',
+          payload: Uint8List(0),
+          ttl: 3,
+        );
+
+        final received = <Message>[];
+        final sub = tB.incoming.listen(received.add);
+        final result = strategy.onIncoming(
+          peerId: 'peer-A',
+          localDeviceId: 'self-device',
+          msg: msg,
+          seenCache: bloom,
+        );
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(result, isNull);
+        expect(received, isEmpty);
+        // Seen-cache should still register the id so echoes get deduped.
+        expect(bloom.mightContain(msg.id), isTrue);
+      },
+    );
+
+    test(
+      'onIncoming with mode == direct and recipientId != localDeviceId '
+      'returns the decremented message but does NOT broadcast',
+      () async {
+        final strategy = MirrorRelayStrategy(discovery: discovery);
+        final msg = Message.create(
+          mode: MessageMode.direct,
+          type: MessageType.chat,
+          channelId: '',
+          senderId: 'peer-X',
+          recipientId: 'someone-else',
+          payload: Uint8List(0),
+          ttl: 3,
+        );
+
+        final received = <Message>[];
+        final sub = tB.incoming.listen(received.add);
+        final result = strategy.onIncoming(
+          peerId: 'peer-A',
+          localDeviceId: 'self-device',
+          msg: msg,
+          seenCache: bloom,
+        );
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(result, isNotNull);
+        expect(result!.ttl, msg.ttl - 1);
+        expect(result.hopCount, msg.hopCount + 1);
+        // Not for us → must not be re-broadcast.
+        expect(received, isEmpty);
+      },
+    );
+
+    test(
+      'onIncoming with mode == direct and recipientId == localDeviceId '
+      'DOES broadcast (this node is the addressee)',
+      () async {
+        final strategy = MirrorRelayStrategy(discovery: discovery);
+        final msg = Message.create(
+          mode: MessageMode.direct,
+          type: MessageType.chat,
+          channelId: '',
+          senderId: 'peer-X',
+          recipientId: 'self-device',
+          payload: Uint8List(0),
+          ttl: 3,
+        );
+
+        final received = <Message>[];
+        final sub = tB.incoming.listen(received.add);
+        final result = strategy.onIncoming(
+          peerId: 'peer-A',
+          localDeviceId: 'self-device',
+          msg: msg,
+          seenCache: bloom,
+        );
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+
+        expect(result, isNotNull);
+        expect(received, hasLength(1));
+        expect(received.first.id, msg.id);
       },
     );
 

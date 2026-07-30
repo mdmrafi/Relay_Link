@@ -13,14 +13,61 @@
 //       - BROADCAST messages are always re-injected if not seen.
 //   * The orchestrator cleans up on stop() and is idempotent.
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relaylink/features/gateway/relay.dart';
+import 'package:relaylink/mesh/discovery.dart';
 import 'package:relaylink/mesh/transport.dart';
 import 'package:relaylink/models/message.dart';
 import 'package:relaylink/transport/internet.dart';
 import 'package:relaylink/transport/transport.dart';
+
+/// In-memory BLE-radio stand-in for the legacy Gateway relay tests.
+/// Lets us synthesize peer-found/connected events so the
+/// `MeshTransport._connectedPeerIds` set is non-empty when the relay
+/// re-injects a pulled message via `send()`.
+class _FakeMeshPlatform implements MeshDiscoveryPlatform {
+  final StreamController<MeshPlatformEvent> _eventsController =
+      StreamController<MeshPlatformEvent>.broadcast();
+  final Map<String, List<Uint8List>> sent = <String, List<Uint8List>>{};
+
+  @override
+  bool isBluetoothEnabled = true;
+
+  @override
+  bool hasPermissions = true;
+
+  @override
+  Future<bool> requestPermissions() async => true;
+
+  @override
+  Future<void> startAdvertising({required String serviceName}) async {}
+
+  @override
+  Future<void> stopAdvertising() async {}
+
+  @override
+  Future<void> startDiscovery({required String serviceName}) async {}
+
+  @override
+  Future<void> stopDiscovery() async {}
+
+  @override
+  Future<void> connect(String peerId) async {}
+
+  @override
+  Future<void> disconnect(String peerId) async {}
+
+  @override
+  Future<void> sendPayload(String peerId, Uint8List bytes) async {
+    sent.putIfAbsent(peerId, () => <Uint8List>[]).add(bytes);
+  }
+
+  @override
+  Stream<MeshPlatformEvent> get events => _eventsController.stream;
+}
 
 /// In-memory [FirestoreGateway] for tests. Records every push and lets
 /// tests enqueue pull candidates.
@@ -126,7 +173,8 @@ Message _msg({
 /// GatewayRelay with the given toggle/peers state. Returns the parts so
 /// tests can drive them.
 class _RelayFixture {
-  final MeshTransport mesh = MeshTransport();
+  final _FakeMeshPlatform _platform = _FakeMeshPlatform();
+  late final MeshTransport mesh;
   late final InternetTransport internet;
   final TransportManager manager = TransportManager();
   final FakeFirestoreGateway firestore = FakeFirestoreGateway();
@@ -137,6 +185,24 @@ class _RelayFixture {
   final Set<String> knownPeers = <String>{'peer-2'};
 
   _RelayFixture() {
+    // Wire the mesh transport to a fake BLE platform so we can
+    // synthesize a connected peer. Post Wave 3's send() fix, `send()`
+    // refuses to record into `_outgoing` when `_connectedPeerIds` is
+    // empty (only the legacy `setSimulatedPeerConnected` knob is
+    // enough to flip `isAvailable()`, but the actual fan-out step
+    // still needs a real peer id). Injecting one here keeps the
+    // existing assertion `expect(fx.mesh.simulatedOutgoing.any(...))`
+    // honest.
+    mesh = MeshTransport(
+      discovery: MeshDiscovery(platform: _platform),
+    );
+    mesh.startRadio();
+    _platform._eventsController.add(
+      const MeshPlatformPeerFound('fake-peer-1', 'FakePeer'),
+    );
+    _platform._eventsController.add(
+      const MeshPlatformPeerConnected('fake-peer-1'),
+    );
     manager.register(mesh);
     internet = InternetTransport(
       gateway: firestore,
@@ -435,7 +501,7 @@ void main() {
       expect(fx.relay.reInjected.any((x) => x.id == 'fcast-1'), isTrue);
     });
 
-    test('pulled message is re-injected with hop_count+1', () async {
+    test('pulled message is re-injected with hop_count+2', () async {
       fx.toggle = true;
       fx.relay.start();
       final m = _msg(
@@ -444,6 +510,7 @@ void main() {
         type: MessageType.chat,
         senderId: 'remote-peer',
         hopCount: 2,
+        ttl: 2,
       );
       fx.firestore.enqueueBroadcastPull(m);
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -455,7 +522,7 @@ void main() {
       // available).
       expect(fx.mesh.simulatedOutgoing.any((x) => x.id == 'pcast'), isTrue);
       final r = fx.mesh.simulatedOutgoing.firstWhere((x) => x.id == 'pcast');
-      expect(r.hopCount, 3, reason: 'hop_count incremented by 1');
+      expect(r.hopCount, 4, reason: 'hop_count incremented by 2');
     });
 
     test('DIRECT pulled message addressed to unknown peer is dropped',

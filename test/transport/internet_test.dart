@@ -69,6 +69,13 @@ class _FakeFirestoreGateway implements FirestoreGateway {
   /// Throw on the next push to test error surfacing.
   bool throwOnPush = false;
 
+  /// If non-null, every broadcast pull throws this. Used to exercise the
+  /// auto-poll error-handling path.
+  Object? throwOnBroadcastPull;
+
+  /// If non-null, every direct pull throws this.
+  Object? throwOnDirectPull;
+
   @override
   Future<void> pushMessage(Message msg) async {
     if (throwOnPush) {
@@ -84,6 +91,9 @@ class _FakeFirestoreGateway implements FirestoreGateway {
     Set<String> channelIds = const <String>{},
   }) async {
     broadcastPulls++;
+    if (throwOnBroadcastPull != null) {
+      throw throwOnBroadcastPull!;
+    }
     final out = broadcastQueue.toList();
     broadcastQueue.clear();
     return out;
@@ -95,6 +105,9 @@ class _FakeFirestoreGateway implements FirestoreGateway {
     DateTime since,
   ) async {
     directPulls++;
+    if (throwOnDirectPull != null) {
+      throw throwOnDirectPull!;
+    }
     final out = directQueue.toList();
     directQueue.clear();
     return out;
@@ -551,9 +564,9 @@ void main() {
     });
   });
 
-  group('Gateway-relay integration (no behavior change)', () {
-    test('pollStart/pollStop still drive an additional poll timer '
-        '(compatibility with #22)', () async {
+  group('Gateway-relay integration', () {
+    test('pollStart/pollStop drive an additional poll timer (#22 compat)',
+        () async {
       // The #22 gateway relay uses pollStart() / pollStop() on the same
       // InternetTransport instance. Those methods must still drive a poll
       // loop (the gateway code path), independent of the auto-poll loop.
@@ -574,6 +587,181 @@ void main() {
       transport.pollStop();
       await Future<void>.delayed(const Duration(milliseconds: 120));
       expect(fx.broadcastPulls, pullsAfterGateway);
+    });
+
+    test('gateway poll applies relay semantics: seen-cache + TTL/hop '
+        '(spec §9 parity with auto-poll)', () async {
+      // The gateway poll path must apply the same relay semantics as the
+      // auto-poll path (seen-cache dedup, TTL decrement, hopCount
+      // increment, origin stamp, manager rebroadcast). Per spec §9 every
+      // relay hop decrements TTL and increments hop_count.
+      final fx = _FakeFirestoreGateway();
+      final seen = _FakeSeenCache();
+      final manager = _FakeTransportManager();
+      final transport = InternetTransport(
+        gateway: fx,
+        ownSenderId: 'me',
+        seenCache: seen,
+        manager: manager,
+        pollInterval: const Duration(milliseconds: 30),
+      );
+      transport.setAvailable(true);
+      final original = _msg(
+        id: 'gw-1',
+        mode: MessageMode.broadcast,
+        type: MessageType.chat,
+        senderId: 'remote',
+        ttl: 8,
+        hopCount: 2,
+      );
+      fx.broadcastQueue.add(original);
+      final sub = transport.incoming.listen((_) {});
+      transport.pollStart();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(seen.seenIds, contains('gw-1'),
+          reason: 'gateway poll must mark the seen-cache');
+      expect(manager.rebroadcasts.where((m) => m.id == 'gw-1'), isNotEmpty,
+          reason: 'gateway poll must rebroadcast via manager');
+      final r = manager.rebroadcasts.firstWhere((m) => m.id == 'gw-1');
+      expect(r.ttl, 7, reason: 'TTL decremented on gateway relay hop');
+      expect(r.hopCount, 3,
+          reason: 'hop_count incremented on gateway relay hop');
+      expect(r.origin, MessageOrigin.internet);
+      await sub.cancel();
+      transport.pollStop();
+    });
+  });
+
+  group('InternetTransport error surfacing (spec §9/§10)', () {
+    // Critical: previously _autoPollTick swallowed every error. The
+    // manager never learned the gateway was broken. Now we surface:
+    //   * a Stream<InternetTransportHealth>
+    //   * an optional onPollError callback
+    //   * a debugPrint log line
+    // Tests pin those three contracts.
+
+    test('FirestoreGatewayUnavailable on pull → health stream emits '
+        'firestoreUnavailable', () async {
+      final fx = _FakeFirestoreGateway()
+        ..throwOnBroadcastPull = const FirestoreGatewayUnavailable();
+      final transport = InternetTransport(
+        gateway: fx,
+        ownSenderId: 'me',
+        seenCache: _FakeSeenCache(),
+        manager: _FakeTransportManager(),
+        pollInterval: const Duration(milliseconds: 30),
+      );
+      transport.setAvailable(true);
+      final events = <InternetTransportHealth>[];
+      final sub = transport.health.listen(events.add);
+      transport.start();
+      // First immediate poll + a couple of timer ticks.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(events, isNotEmpty,
+          reason: 'manager must learn the gateway is unavailable');
+      expect(events, contains(InternetTransportHealth.firestoreUnavailable));
+      await sub.cancel();
+      await transport.stop();
+    });
+
+    test('generic pull error → health stream emits pollFailed, '
+        'onPollError callback fires with the underlying error', () async {
+      final fx = _FakeFirestoreGateway()
+        ..throwOnBroadcastPull = Exception('boom');
+      final pollErrors = <(InternetTransportHealth, Object)>[];
+      final transport = InternetTransport(
+        gateway: fx,
+        ownSenderId: 'me',
+        seenCache: _FakeSeenCache(),
+        manager: _FakeTransportManager(),
+        pollInterval: const Duration(milliseconds: 30),
+        onPollError: (kind, err) => pollErrors.add((kind, err)),
+      );
+      transport.setAvailable(true);
+      final events = <InternetTransportHealth>[];
+      final sub = transport.health.listen(events.add);
+      transport.start();
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(events, contains(InternetTransportHealth.pollFailed));
+      expect(pollErrors, isNotEmpty,
+          reason: 'onPollError must be called on every pull failure');
+      expect(pollErrors.first.$1, InternetTransportHealth.pollFailed);
+      expect(pollErrors.first.$2.toString(), contains('boom'),
+          reason: 'underlying error must be passed to the callback');
+      await sub.cancel();
+      await transport.stop();
+    });
+
+    test('offline: no health events are emitted while _available=false',
+        () async {
+      final fx = _FakeFirestoreGateway()
+        ..throwOnBroadcastPull = Exception('should not be reached');
+      final transport = InternetTransport(
+        gateway: fx,
+        ownSenderId: 'me',
+        seenCache: _FakeSeenCache(),
+        manager: _FakeTransportManager(),
+        pollInterval: const Duration(milliseconds: 30),
+      );
+      final events = <InternetTransportHealth>[];
+      final sub = transport.health.listen(events.add);
+      transport.start();
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(events, isEmpty,
+          reason: 'offline → no pulls → no errors to surface');
+      expect(fx.broadcastPulls, 0);
+      await sub.cancel();
+      await transport.stop();
+    });
+
+    test('successful poll after failures → no spurious health events',
+        () async {
+      final fx = _FakeFirestoreGateway();
+      final pollErrors = <(InternetTransportHealth, Object)>[];
+      final transport = InternetTransport(
+        gateway: fx,
+        ownSenderId: 'me',
+        seenCache: _FakeSeenCache(),
+        manager: _FakeTransportManager(),
+        pollInterval: const Duration(milliseconds: 30),
+        onPollError: (kind, err) => pollErrors.add((kind, err)),
+      );
+      transport.setAvailable(true);
+      // First tick fails; second tick succeeds.
+      fx.throwOnBroadcastPull = Exception('transient');
+      final events = <InternetTransportHealth>[];
+      final sub = transport.health.listen(events.add);
+      transport.start();
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final eventsAfterFailure = events.length;
+      expect(eventsAfterFailure, greaterThan(0));
+      fx.throwOnBroadcastPull = null;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(events.length, eventsAfterFailure,
+          reason: 'healthy ticks must not emit health events');
+      await sub.cancel();
+      await transport.stop();
+    });
+
+    test('dispose() closes the health stream', () async {
+      final transport = InternetTransport(
+        gateway: _FakeFirestoreGateway(),
+        ownSenderId: 'me',
+        seenCache: _FakeSeenCache(),
+        manager: _FakeTransportManager(),
+      );
+      var streamDone = false;
+      final sub = transport.health.listen(
+        (_) {},
+        onDone: () => streamDone = true,
+      );
+      await transport.dispose();
+      // Give the onDone callback a microtask to fire.
+      await Future<void>.delayed(Duration.zero);
+      expect(streamDone, isTrue,
+          reason: 'health stream must be closed on dispose()');
+      await sub.cancel();
     });
   });
 }

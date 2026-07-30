@@ -193,7 +193,9 @@ class CapabilityDisclosurePage extends StatelessWidget {
       appBar: AppBar(
         title: Semantics(
           header: true,
-          label: "This device's capabilities",
+          // No explicit `label` — the child Text is already announced by the
+          // framework; adding a duplicate label would cause screen readers to
+          // read "This device's capabilities" twice.
           child: const Text("This device's capabilities"),
         ),
       ),
@@ -306,6 +308,10 @@ class CapabilityDisclosurePage extends StatelessWidget {
                       : '$_confirmLabel, return to settings',
                   button: true,
                   enabled: true,
+                  // Exclude the inner FilledButton's own semantics so the
+                  // accessible label/hint we provide above isn't overwritten
+                  // or duplicated by the button's default child semantics
+                  // (which would otherwise announce the visible label again).
                   excludeSemantics: true,
                   child: FilledButton(
                     key: const ValueKey<String>('capabilityConfirmButton'),

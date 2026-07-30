@@ -143,36 +143,9 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
 
   Future<void> _onCreate() async {
     setState(() => _scanError = null);
-    final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          key: const ValueKey<String>('createChannelDialog'),
-          title: const Text('Create channel'),
-          content: TextField(
-            key: const ValueKey<String>('createChannelNameField'),
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(
-              labelText: 'Channel name',
-              helperText: 'Letters, digits, dashes, underscores',
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              key: const ValueKey<String>('createChannelCancel'),
-              onPressed: () => Navigator.of(ctx).pop<String>(null),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              key: const ValueKey<String>('createChannelConfirm'),
-              onPressed: () => Navigator.of(ctx).pop<String>(controller.text),
-              child: const Text('Create'),
-            ),
-          ],
-        );
-      },
+      builder: (ctx) => const _CreateChannelDialog(),
     );
     if (name == null) return;
     final trimmed = name.trim();
@@ -198,7 +171,7 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
     final String? payload;
     try {
       payload = await scan();
-    } on Object catch (e) {
+    } on Exception catch (e) {
       if (!mounted) return;
       setState(() => _scanError = 'Scan failed: $e');
       return;
@@ -344,6 +317,63 @@ class _ChannelRow extends StatelessWidget {
           ? const Icon(Icons.lock, key: ValueKey<String>('channelLockIcon'))
           : null,
       onTap: onTap,
+    );
+  }
+}
+
+/// Dialog used by the "Create channel" flow. Owns its own
+/// [TextEditingController] so it can be disposed when the dialog is
+/// dismissed (otherwise the controller leaks until GC, and rapid
+/// re-open accumulates in production).
+class _CreateChannelDialog extends StatefulWidget {
+  const _CreateChannelDialog();
+
+  @override
+  State<_CreateChannelDialog> createState() => _CreateChannelDialogState();
+}
+
+class _CreateChannelDialogState extends State<_CreateChannelDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const ValueKey<String>('createChannelDialog'),
+      title: const Text('Create channel'),
+      content: TextField(
+        key: const ValueKey<String>('createChannelNameField'),
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Channel name',
+          helperText: 'Letters, digits, dashes, underscores',
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          key: const ValueKey<String>('createChannelCancel'),
+          onPressed: () => Navigator.of(context).pop<String>(null),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey<String>('createChannelConfirm'),
+          onPressed: () =>
+              Navigator.of(context).pop<String>(_controller.text),
+          child: const Text('Create'),
+        ),
+      ],
     );
   }
 }

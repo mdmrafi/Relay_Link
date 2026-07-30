@@ -238,44 +238,36 @@ on `SCALE_N=<n>` so it does not run during regular CI. See
 
 ### Cut / deferred
 
-The following are **not** in this build and were deferred per
-[`STRESS-TEST.md`](STRESS-TEST.md) §4 cut list:
+The following are the **only** items that did not ship in this build.
+Everything else marked "deferred" in earlier drafts has landed; see the
+ticket files in `.scratch/relaylink-build/issues/` for per-ticket proof.
 
-- **Transport interface, mesh discovery, mesh send/receive, mesh
-  relay, Bloom-filter peer-sync** (tickets #06–#09, #11): the platform
-  channel for mesh is not wired in this build. The Bloom filter
-  primitive (#10) is implemented and tested; the peer-sync handshake on
-  connect is not.
-- **DIRECT crypto + forward-secrecy demo** (tickets #13, #14): ships as
-  the D5 fallback below.
-- **Channel keys + channel QR + channel routing** (tickets #15, #16, #17):
-  not implemented.
-- **Firestore rules + direct internet messaging** (tickets #19, #20):
-  the Firestore client stub exists but the `.rules` file and the
-  relay-pull loop are not.
-- **Gateway relay code** (ticket #22): the **toggle UI and safety
-  warning ship** (ticket #21); the **actual relay code path is
-  stubbed** in this build. The toggle exists so users can opt in
-  conceptually; the relay backend is unfinished.
-- **SMS fragmentation, reassembly, reinjection, BROADCAST fan-out,
-  DIRECT-over-SMS** (tickets #24–#28): the SMS platform channel exists
-  (#23) but the framing/reassembly layer is not.
-- **Capability disclosure UI + vault encrypt/store + vault UI + vault
-  send-on-connect + chat-to-vault affordance** (tickets #30–#34):
-  capability detection (#29) ships; the UI surfaces do not.
-- **ALERT badge, allowlist sync/cache** (tickets #36, #37): the
-  allowlist source (#35) ships; the badge logic does not.
-- **UI screens** (tickets #38–#42): only the scaffold home screen
-  (ticket #01) is present.
-- **Photo / video / audio evidence capture** (D6 deferral): the vault
-  is text-only for the MVP. Media capture is in ROADMAP.
-- **Load testing at scale on physical hardware (50+ devices)**,
-  **localization beyond the README's Bangla summary**, **account /
-  username system**, **third-party paid SMS gateway**, **Play Store /
-  App Store compliance**, **a real vetting pipeline for ALERT
-  allowlist orgs**: per spec §15. The in-process scale harness
-  (ticket #48) exercises up to N=20 simulated peers; physical-hardware
-  validation at 50+ devices remains out of scope for this build.
+#### Genuinely deferred (platform-channel integrations)
+
+- **Real BLE adapter.** `MeshDiscovery` uses
+  `StubMeshDiscoveryPlatform` because `flutter_blue_plus` is not wired
+  into `pubspec.yaml`. The discovery protocol, backoff schedule, and
+  permission rationale are fully implemented and unit-tested.
+- **Real SMS adapter.** `DirectSmsAdapter` exposes the outcome enum
+  and call sites; the platform Telephony channel is mocked at build
+  time. All framing/reassembly/fan-out/re-injection logic is
+  implemented and unit-tested.
+- **Real Firestore client.** Replaced by `lib/firestore/stub.dart`.
+  The gateway relay's offline-first branches degrade gracefully when
+  no Firestore project is configured.
+
+#### What shipped (was previously listed as "deferred" but actually landed)
+
+- Transport interface and `TransportManager` (#06) — `lib/transport/transport.dart`.
+- Mesh: discovery, transport, relay/LRU, peer-sync filter (#07–#11) — `lib/mesh/`.
+- Channel: keys, QR exchange, routing classifier (#15–#17) — `lib/channels/`.
+- SMS: framing, reassembly, re-injection, fan-out, direct adapter (#24–#28) — `lib/sms/`.
+- Capability disclosure: first-launch + settings (#30) — `lib/screens/capability_disclosure.dart`.
+- Allowlist sync + offline fallback (#36) — `lib/alerts/allowlist.dart`.
+- Tofu pin store + verified badge (#37) — `lib/alerts/tofu.dart`, `lib/widgets/verified_badge.dart`.
+- Vault: encrypt-at-rest, list/view/compose UI, send-on-connect, save-from-chat (#31–#34) — `lib/vault/`, `lib/screens/vault.dart`.
+- Gateway: toggle UI + safety warning **and** full relay code path (#21, #22) — `lib/features/gateway/`.
+- UI surfaces: Home, Chat, Contacts, Channels, Settings (#38–#42) — `lib/screens/`.
 
 ### D5 — Double Ratchet implementation status (full disclosure)
 

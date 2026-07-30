@@ -26,6 +26,7 @@ class MirrorRelayStrategy implements RelayStrategy {
   @override
   Message? onIncoming({
     required String peerId,
+    required String localDeviceId,
     required Message msg,
     required BloomFilter seenCache,
   }) {
@@ -33,6 +34,10 @@ class MirrorRelayStrategy implements RelayStrategy {
       return null;
     }
     seenCache.insert(msg.id);
+    // Self-echo suppression: don't re-broadcast messages we originated.
+    if (msg.senderId == localDeviceId) {
+      return null;
+    }
     if (msg.ttl <= 0) {
       return null;
     }
@@ -40,6 +45,13 @@ class MirrorRelayStrategy implements RelayStrategy {
       ttl: msg.ttl - 1,
       hopCount: msg.hopCount + 1,
     );
+    // Direct-mode recipient filtering: only re-broadcast when this node is
+    // the addressee (or the addressee is unset, defensively).
+    if (msg.mode == MessageMode.direct &&
+        msg.recipientId != null &&
+        msg.recipientId != localDeviceId) {
+      return decremented;
+    }
     _discovery.broadcast(senderId: peerId, msg: decremented);
     return decremented;
   }

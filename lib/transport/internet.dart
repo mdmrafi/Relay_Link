@@ -24,7 +24,7 @@
 //     `lib/features/gateway/relay.dart` while the user's gateway toggle is
 //     ON. Kept for Ticket #22 compatibility. Gateway-relay messages are
 //     emitted raw on `incoming` so the relay orchestrator can apply its
-//     own dedup/hop rules; the auto-poll applies its own (different) rules.
+//     own routing rules after the transport applies the shared relay semantics.
 //
 // SAFETY (auto-poll pull-side, per spec §9 "received-via-SMS messages
 // re-enter normal pipeline" — same applies here):
@@ -35,6 +35,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 
 import '../backend/firebase.dart';
 import '../backend/schemas.dart';
@@ -81,6 +82,20 @@ class FirestoreGatewayUnavailable implements Exception {
   String toString() =>
       'FirestoreGatewayUnavailable: FirebaseBackend is not initialized';
 }
+
+/// Health signal emitted on [InternetTransport.health] whenever the
+/// auto-poll encounters a non-recoverable failure. Per spec §9/§10,
+/// the next tick will retry — but the manager / UI should be told so
+/// it can surface "internet broken" to the user instead of silently
+/// appearing to work.
+///
+/// * [InternetTransportHealth.firestoreUnavailable] — Firestore is
+///   not initialized (`FirestoreGatewayUnavailable` thrown). Local-only
+///   mode; treat as a degraded but expected state.
+/// * [InternetTransportHealth.pollFailed] — any other pull-side error
+///   (network failure, auth error, etc.). Could be transient; we still
+///   emit one event per failure so the UI knows.
+enum InternetTransportHealth { firestoreUnavailable, pollFailed }
 
 /// Minimal interface over the seen-cache. Production wires up
 /// `LocalDbSeenCache`; tests pass a fake. The `Internet` prefix avoids a
@@ -210,8 +225,22 @@ class InternetTransport implements Transport {
   final InternetSeenCache _seenCache;
   final InternetTransportManagerHost _manager;
 
+  /// Optional callback invoked on every auto-poll / gateway-poll
+  /// failure *in addition to* emitting on [health]. Lets the manager
+  /// react synchronously (e.g. flip a UI flag) without subscribing to
+  /// a stream. The supplied [Object] is the underlying error; the
+  /// [InternetTransportHealth] enum describes the category.
+  final void Function(InternetTransportHealth, Object)? _onPollError;
+
   final StreamController<Message> _incomingController =
       StreamController<Message>.broadcast();
+
+  /// Broadcast stream of health events. Emits on every poll failure so
+  /// the app shell / UI can surface "internet poll failed" without
+  /// coupling to a specific callback. See [InternetTransportHealth]
+  /// for the categories.
+  final StreamController<InternetTransportHealth> _healthController =
+      StreamController<InternetTransportHealth>.broadcast();
 
   /// Timer for the OWN-TRAFFIC auto-poll (started via [start]).
   Timer? _autoPollTimer;
@@ -242,11 +271,13 @@ class InternetTransport implements Transport {
     Duration pollInterval = const Duration(seconds: 30),
     InternetSeenCache? seenCache,
     InternetTransportManagerHost? manager,
+    void Function(InternetTransportHealth, Object)? onPollError,
   })  : _gateway = gateway,
         _ownSenderId = ownSenderId,
         _channelIds = channelIds,
         _seenCache = seenCache ?? _NoSeenCache(),
         _manager = manager ?? _NoTransportManager(),
+        _onPollError = onPollError,
         _pollInterval = pollInterval;
 
   /// Test/dev hook: pretend the device just lost / regained internet.
@@ -272,6 +303,12 @@ class InternetTransport implements Transport {
 
   @override
   Stream<Message> get incoming => _incomingController.stream;
+
+  /// Stream of pull-side health events. Emits whenever the auto-poll
+  /// or gateway-poll fails (once per failure). Listeners can flip a
+  /// UI flag ("internet poll failed") without coupling to the
+  /// constructor callback. Broadcast.
+  Stream<InternetTransportHealth> get health => _healthController.stream;
 
   // ---------------------------------------------------------------------------
   // Auto-poll lifecycle (own traffic — production behavior per spec §10)
@@ -314,10 +351,17 @@ class InternetTransport implements Transport {
       for (final m in directs) {
         await _filterAndRebroadcast(m, MessageOrigin.internet);
       }
-    } on FirestoreGatewayUnavailable {
-      // Local-only mode — silently no-op.
-    } catch (_) {
+    } on FirestoreGatewayUnavailable catch (e) {
+      // Local-only mode — expected when Firebase isn't initialized.
+      // Still surface so the manager / UI can render "internet offline".
+      _emitHealth(InternetTransportHealth.firestoreUnavailable, e);
+    } catch (e, st) {
       // Pull failures are non-fatal; the next tick will retry.
+      // But we MUST log + surface them — silently swallowing was the
+      // critical bug. Without this, the manager never learns the
+      // gateway is broken (spec §9/§10).
+      debugPrint('InternetTransport auto-poll error: $e\n$st');
+      _emitHealth(InternetTransportHealth.pollFailed, e);
     }
   }
 
@@ -349,25 +393,22 @@ class InternetTransport implements Transport {
         channelIds: _channelIds,
       );
       for (final m in broadcast) {
-        if (!_incomingController.isClosed) {
-          _incomingController.add(m);
-        }
+        await _filterAndRebroadcast(m, MessageOrigin.internet);
       }
       final directs = await _gateway.pullDirectFor(_ownSenderId, now);
       for (final m in directs) {
-        if (!_incomingController.isClosed) {
-          _incomingController.add(m);
-        }
+        await _filterAndRebroadcast(m, MessageOrigin.internet);
       }
-    } on FirestoreGatewayUnavailable {
-      // Local-only mode — silently no-op.
-    } catch (_) {
-      // Pull failures are non-fatal; the next tick will retry.
+    } on FirestoreGatewayUnavailable catch (e) {
+      _emitHealth(InternetTransportHealth.firestoreUnavailable, e);
+    } catch (e, st) {
+      debugPrint('InternetTransport gateway-poll error: $e\n$st');
+      _emitHealth(InternetTransportHealth.pollFailed, e);
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Pull-side filter (auto-poll only)
+  // Pull-side filter
   // ---------------------------------------------------------------------------
 
   /// Apply the duplicate / invalid / TTL filters per spec §9 / Ticket
@@ -403,6 +444,19 @@ class InternetTransport implements Transport {
     _started = false;
     if (!_incomingController.isClosed) {
       await _incomingController.close();
+    }
+    if (!_healthController.isClosed) {
+      await _healthController.close();
+    }
+  }
+
+  /// Internal helper: a poll tick failed. Log it, fire the optional
+  /// callback, and emit on [health]. Centralized so the auto-poll
+  /// and gateway-poll paths stay symmetric.
+  void _emitHealth(InternetTransportHealth kind, Object error) {
+    _onPollError?.call(kind, error);
+    if (!_healthController.isClosed) {
+      _healthController.add(kind);
     }
   }
 }

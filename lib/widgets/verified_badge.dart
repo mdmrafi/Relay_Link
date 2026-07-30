@@ -98,6 +98,7 @@ class _VerifiedChip extends StatelessWidget {
       case VerifiedBadgeStyle.chip:
         return Semantics(
           label: 'Verified alert from $name',
+          excludeSemantics: true,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
@@ -125,6 +126,7 @@ class _VerifiedChip extends StatelessWidget {
       case VerifiedBadgeStyle.inline:
         return Semantics(
           label: 'Verified alert from $name',
+          excludeSemantics: true,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -166,6 +168,7 @@ class _UnsignedChip extends StatelessWidget {
       case VerifiedBadgeStyle.chip:
         return Semantics(
           label: 'Alert signed by $name',
+          excludeSemantics: true,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
@@ -193,6 +196,7 @@ class _UnsignedChip extends StatelessWidget {
       case VerifiedBadgeStyle.inline:
         return Semantics(
           label: 'Alert signed by $name',
+          excludeSemantics: true,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [

@@ -17,6 +17,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../models/message.dart';
@@ -316,8 +317,9 @@ class LocalDb {
             final decoded = jsonDecode(raw);
             if (decoded is! Map<String, dynamic>) return null;
             return Message.fromJson(decoded);
-          } catch (_) {
-            return null;
+          } catch (e, st) {
+            debugPrint('listMessages: failed to decode message row: $e\n$st');
+            rethrow;
           }
         })
         .whereType<Message>()

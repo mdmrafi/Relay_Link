@@ -40,7 +40,7 @@
 ## Next session's work — frontier tickets (no blockers, can start immediately)
 
 ### Wave 3 priority 1 (all have blockers done):
-- **#06** Transport interface + TransportManager + LoopbackTransport (blocks #07, #20)
+- **#06** Transport interface + TransportManager + EchoTransport (blocks #07, #20)
 - **#13** DIRECT crypto (HKDF-chain fallback) — binding per D5 verdict
 - **#15** Channel key generation + storage (blocks #16, #17)
 - **#19** Firestore security rules (blocks #20)

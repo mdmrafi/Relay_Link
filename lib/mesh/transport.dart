@@ -87,15 +87,20 @@ class MeshTransport implements Transport {
   Future<void> send(Message msg) async {
     if (!isAvailable()) throw TransportUnavailableException(name);
 
-    // Track every message we send before fan-out so even a partially-
-    // failing broadcast still leaves a trace (legacy hook).
-    _outgoing.add(msg);
-
     final peerIds = _connectedPeerIds;
     if (peerIds.isEmpty && _simulatedPeerConnected) return;
     if (peerIds.isEmpty) throw TransportUnavailableException(name);
 
+    // Record the outgoing message only after the availability check
+    // so the legacy hook reflects sends that actually proceeded.
+    _outgoing.add(msg);
+
     final bytes = MeshDiscovery.encodeMessage(msg);
+    // NOTE: per-peer errors other than the first are not propagated.
+    // For a broadcast relay, only the first failure is rethrown; any
+    // additional per-peer failures during the same send are silently
+    // dropped. Callers that need full error aggregation should wrap
+    // `send` in their own fan-out logic.
     Object? firstError;
     for (final peerId in peerIds) {
       try {

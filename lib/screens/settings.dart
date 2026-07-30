@@ -30,6 +30,11 @@ import 'package:relaylink/screens/capability_disclosure.dart';
 /// (`version: 1.0.0+1`). Not pulled from `package_info_plus` because the
 /// project doesn't depend on it; the constant avoids pulling in a new
 /// dependency just to display a static string.
+///
+/// DRIFT RISK: this is hard-coded, so it will silently fall out of sync
+/// when `pubspec.yaml`'s `version:` is bumped. There is no automated CI
+/// check guarding it; the format is `X.Y.Z+N` per the Flutter versioning
+/// convention, and any bump in `pubspec.yaml` must be mirrored here.
 const String kAppVersion = '1.0.0+1';
 
 /// Human-readable label for the README link tile. The URL itself lives in
@@ -40,9 +45,13 @@ const String kReadmeLinkTitle = 'Open the project README';
 ///
 /// The repository is local for this hackathon submission; the URL points to
 /// the canonical GitHub project page where the README is hosted. The README
-/// is also checked into the repo at the project root, so this is a pointer
-/// rather than a hard dependency.
-const String kReadmeUrl = 'https://github.com/relaylink/relaylink#readme';
+/// is also checked into the repo at the project root (`README.md`), so this
+/// is a pointer rather than a hard dependency.
+///
+/// Previously hard-coded to a placeholder `relaylink/relaylink` URL that
+/// didn't exist; this now points at the actual submission repo.
+const String kReadmeUrl =
+    'https://github.com/Azm1ne/July-2026-hackathon#readme';
 
 /// Title for the README disclosure dialog shown when the user taps the
 /// README link tile. The dialog lists the README URL and offers a copy
@@ -171,7 +180,7 @@ class SettingsAboutScreen extends StatelessWidget {
               leading: const Icon(Icons.devices_other),
               title: const Text("This device's capabilities"),
               subtitle: const Text(
-                'See what this device can and can\u2019t do',
+                'See what this device can and can’t do',
               ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
