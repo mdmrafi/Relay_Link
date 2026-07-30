@@ -135,6 +135,34 @@ sites) is recorded as a follow-up ticket, not part of this build.
 * **flutter_secure_storage** — device identity seed, vault-wrapping key.
   Never contains plaintext vault records.
 
+## Scale harness
+
+The in-process mesh simulator under `test/scale/` proves the mesh-layer
+primitives — TTL decrement, bloom-filter seen-cache, broadcast fan-out,
+direct addressing — survive at scale before physical-hardware testing.
+
+* **`RelayStrategy`** (`test/scale/relay_strategy.dart`) is the abstract
+  seam between a peer's `transport.incoming` and the relay decision.
+  When the real mesh transport lands, a `MeshRelayStrategy` will
+  implement the same interface without touching the scenarios or
+  metrics code.
+* **`MirrorRelayStrategy`** (`test/scale/mirror_relay_strategy.dart`) is
+  the in-process implementation against `LoopbackMeshDiscovery`. It
+  performs seen-cache dedup, TTL decrement, hop-count increment, and
+  re-broadcast — the same relay logic that previously lived inline in
+  `_Peer._onIncoming`.
+* **`peerErrorCount`** is now sourced from a real per-peer try/catch
+  around `strategy.onIncoming` — a single bad peer cannot cascade into
+  tearing the harness down. Previously hardcoded to `0` with a "Hook
+  point reserved" comment.
+* **Scenarios**: broadcast / direct / mixed / saturation + a bloom FPR
+  probe. Gated on `SCALE_N=<n>` so the regular CI run stays at 314
+  tests; the harness is opt-in via `--dart-define=SCALE_N=12` or
+  `SCALE_N=20` for heavier runs.
+* **Integration log**: N=4/8/12/20 runs at
+  [`docs/scale-harness-integration-run-2026-07-30.md`](docs/scale-harness-integration-run-2026-07-30.md)
+  — 0% FPR, 0 lost messages, 0 peer errors across all scenarios.
+
 ## Gateway mode
 
 When the user toggles Gateway ON:

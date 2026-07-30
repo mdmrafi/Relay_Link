@@ -219,12 +219,22 @@ The following are implemented in this build (commits on `origin/main`):
 | #23 | SMS platform channel: `SmsManager` send + SMS receiver, Android + iOS paths, APK builds clean | `lib/sms/platform_channel.dart`, `android/.../SmsPlugin.kt` |
 | #29 | Capability detection: 9 features with reasons, exposed for first-launch disclosure and Settings | `lib/capabilities/detect.dart` |
 | #35 | Verified orgs allowlist: `assets/verified_orgs.json` + loader that rejects non-demo entries | `lib/allowlist/verified_orgs.dart`, `assets/verified_orgs.json` |
+| #48 | Scale-harness: in-process 4–20-peer mesh simulator with `RelayStrategy` seam (`MirrorRelayStrategy`), per-peer try/catch on the relay, four scenarios (broadcast / direct / mixed / saturation) + bloom FPR probe. Integration log: N=4/8/12/20 with 0% FPR, 0 lost messages, 0 peer errors. | `test/scale/` |
 
 The scaffold compiles, the APK builds clean, and the unit tests pass.
 The mesh and SMS transports are wired up at the platform-channel level;
 the visible demo surface above the transport layer (chat screen,
 contacts, channels, settings tabs) is not yet populated in this build
 (see tickets #38–#42).
+
+**Scale-harness integration log** (the N=4/8/12/20 runs that prove the
+mesh primitives — TTL decrement, bloom-filter seen-cache, broadcast
+fan-out, direct addressing — survive at scale before physical-hardware
+testing) is recorded at
+[`docs/scale-harness-integration-run-2026-07-30.md`](docs/scale-harness-integration-run-2026-07-30.md).
+The harness is **synthetic** (loopback in-process, no Bluetooth), gated
+on `SCALE_N=<n>` so it does not run during regular CI. See
+[`test/scale/README.md`](test/scale/README.md) for usage.
 
 ### Cut / deferred
 
@@ -259,11 +269,13 @@ The following are **not** in this build and were deferred per
   (ticket #01) is present.
 - **Photo / video / audio evidence capture** (D6 deferral): the vault
   is text-only for the MVP. Media capture is in ROADMAP.
-- **Load testing at scale (50+ devices)**, **localization beyond the
-  README's Bangla summary**, **account / username system**,
-  **third-party paid SMS gateway**, **Play Store / App Store
-  compliance**, **a real vetting pipeline for ALERT allowlist orgs**:
-  per spec §15.
+- **Load testing at scale on physical hardware (50+ devices)**,
+  **localization beyond the README's Bangla summary**, **account /
+  username system**, **third-party paid SMS gateway**, **Play Store /
+  App Store compliance**, **a real vetting pipeline for ALERT
+  allowlist orgs**: per spec §15. The in-process scale harness
+  (ticket #48) exercises up to N=20 simulated peers; physical-hardware
+  validation at 50+ devices remains out of scope for this build.
 
 ### D5 — Double Ratchet implementation status (full disclosure)
 
@@ -325,7 +337,8 @@ the full Double Ratchet in tree as a library, and the from-scratch
 implementation delivered by ticket #13 (`cutrev-ratchet`) is the natural
 follow-up if the binding-fallback path is later swapped out. That swap
 is mechanical work (route `DirectSession` → `DoubleRatchetSession` in
-the two transport call sites) and is recorded as a follow-up ticket;
+the two transport call sites) and is recorded as
+[ticket #47](.scratch/relaylink-build/issues/47-wire-double-ratchet-direct.md);
 it is not part of this build.
 
 ---
@@ -376,6 +389,13 @@ window — see the **Cut / deferred** section above for what landed and
 what didn't. Every fallback taken is documented in the affected
 ticket file; STRESS-TEST.md's decision log will be updated in the
 follow-up ticket #46.
+
+### Open follow-up tickets (post-build, well-scoped, test-driven)
+
+| Ticket | What | Where |
+|---|---|---|
+| #47 | Wire `DoubleRatchetSession` into DIRECT transports (schema change on `Message.ratchetHeader`, swap `DirectSession` → `DoubleRatchetSession` at the two call sites, re-run `direct_adapter_test.dart` and `internet_test.dart`) | [`.scratch/relaylink-build/issues/47-wire-double-ratchet-direct.md`](.scratch/relaylink-build/issues/47-wire-double-ratchet-direct.md) |
+| #48 | ~~Refactor `mesh_scale_test.dart` to honor the `RelayStrategy` contract (add abstract class, `MirrorRelayStrategy`, wire `peerErrorCount` to a real per-peer try/catch, extend `MeshScaleHarness` to accept a `RelayStrategy`)~~ **Shipped** (this commit set). | [`.scratch/relaylink-build/issues/48-relay-strategy-harness.md`](.scratch/relaylink-build/issues/48-relay-strategy-harness.md) |
 
 ---
 
@@ -690,4 +710,4 @@ SMS গেটওয়ে ব্যবহার করে না।
 
 ---
 
-*Last updated 2026-07-30, ticket #43.*
+*Last updated 2026-07-30, ticket #48 (scale-harness `RelayStrategy` shipped).*
