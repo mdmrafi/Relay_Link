@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Scale-testing harness output (regenerated on every run)
+/test/scale/results/
