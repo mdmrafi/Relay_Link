@@ -49,12 +49,13 @@ messages, with zero infrastructure required. On top of the mesh it stacks
 three things, in this priority order:
 
 1. **Encryption.** BROADCAST (group) messages use AES-256-GCM with a
-   per-channel symmetric key. DIRECT (1:1) messages use a Double-Ratchet
-   chain implemented from scratch in pure Dart (X25519 DH ratchet +
-   symmetric ratchet + HKDF chain + skipped-key storage). The original
-   HKDF-chain-only binding-fallback path is preserved at
-   `lib/crypto/direct.dart` and exercised by the demo; see the
-   [D5 disclosure](#d5--double-ratchet-implementation-status-full-disclosure).
+   per-channel symmetric key. DIRECT (1:1) messages use the HKDF-chain
+   binding-fallback (`DirectSession` in `lib/crypto/direct.dart`) which
+   provides forward secrecy but not post-compromise security. A full
+   Double Ratchet (`DoubleRatchetSession` in `lib/crypto/double_ratchet.dart`)
+   ships as a tested library but is **not wired into any transport**;
+   see the [D5 disclosure](#d5--double-ratchet-implementation-status-full-disclosure)
+   for the honest split.
 2. **Connectivity fallback.** When you send an SOS, RelayLink tries every
    radio the device has at once: mesh, SMS, and internet. You don't pick.
 3. **Text-only Evidence Vault.** A separate "Evidence" surface where you
@@ -175,10 +176,10 @@ The submission video shows the following eight steps. Two Android phones,
    Phone C (not joined, third device) only relays, cannot read. Narrator
    explains the plaintext routing metadata.
 5. **Forward secrecy.** Pause video; narrator "compromises" the chain
-   key at message N; messages 1..N-1 still decrypt, N+1 fails. The shipped
-   implementation is the full Double Ratchet (`lib/crypto/double_ratchet.dart`),
-   so post-compromise security is also restored on the next round-trip via
-   the DH ratchet. See the [D5 disclosure](#d5--double-ratchet-implementation-status-full-disclosure).
+   key at message N; messages 1..N-1 still decrypt, N+1 fails. Per the
+   D5 disclosure, this proves the HKDF-chain forward-secrecy claim, not
+   post-compromise security. The full Double Ratchet lives in the test
+   suite but is not wired into the production DIRECT path.
 6. **SMS fan-out** *(if SMS machinery landed in the build window; if not,
    this step is omitted and the README's "doesn't prove" section records
    it)*. Wi-Fi off, Bluetooth off, cellular on. Phone A SOSes; Phone B
@@ -285,52 +286,47 @@ are physically present at exchange time and do a synchronous X25519
 ECDH at QR-exchange / mesh-handshake), so the package's mandatory
 X3DH is incompatible with the spec's protocol design.
 
-**After the verdict, ticket #13 (`cutrev-ratchet`) implemented the full
-Double Ratchet from scratch in pure Dart** on top of the existing
-`cryptography` package primitives. The active production path is now
-`lib/crypto/double_ratchet.dart` (X25519 DH ratchet + symmetric ratchet
-+ HKDF chain + skipped-key storage). The HKDF-chain-only variant
-originally referenced by the D5 binding-fallback rule is preserved as
-`lib/crypto/direct.dart` for backwards reference and is exercised by
-the `forward_secrecy_demo` tool. The rest of this section describes the
-honored fallback that *would have shipped* if `cutrev-ratchet` had not
-landed; what actually shipped is the full Double Ratchet.
+**What shipped in this build (honest split):**
 
-**What the binding-fallback rule was, and what it would have provided
-if `cutrev-ratchet` had not landed:**
+- `lib/crypto/double_ratchet.dart` — the full Double Ratchet from
+  scratch in pure Dart (`DoubleRatchetSession`), implemented in ticket
+  #13 (`cutrev-ratchet`). Tested by `test/crypto/double_ratchet_test.dart`
+  against X25519 DH ratchet + symmetric-ratchet round-trips, out-of-order
+  delivery, and skipped-key storage. **Library-only: not wired into any
+  transport.** This is the "if-the-binding-fallback-had-not-shipped"
+  implementation that future work could swap in.
+- `lib/crypto/direct.dart` — the HKDF-chain-only binding-fallback
+  (`DirectSession`). This is the class actually used by the production
+  DIRECT code path: `lib/sms/direct_adapter.dart` and `lib/transport/internet.dart`.
+  Forward secrecy across the chain is preserved (each message key is
+  `HKDF(previous_message_key, "rl-msg-v1")`, chain key discarded after
+  use, one-byte sender tag gives Alice→Bob and Bob→Alice independent
+  chains from the same QR-derived seed). Post-compromise security
+  is **not** provided in production: a leaked current chain key exposes
+  all future keys until the chain is re-seeded.
 
-- **What the HKDF-chain-only fallback would have provided:**
-  forward secrecy across the chain. Each message key is
-  `HKDF(previous_message_key, "rl-msg-v1")`, the chain key is discarded
-  after use, and a one-byte sender tag prepended to HKDF's `info`
-  parameter gives Alice→Bob and Bob→Alice independent chains from the
-  same QR-derived seed. Compromise of one message key does not expose
-  earlier message keys on the same chain.
-- **What the HKDF-chain-only fallback would NOT have provided:**
-  **post-compromise security.** A leaked current chain key would have
-  exposed all future keys until the chain was re-seeded. The full Double
-  Ratchet's DH-ratchet half — which catches a leaked chain key by
-  deriving a brand-new chain on the next round-trip — was the missing
-  piece. The fallback was accepted as the spec's binding fallback so the
-  demo could ship rather than block on a from-scratch implementation.
-- **What the demo actually proves (full Double Ratchet):** the
-  `forward_secrecy_demo` tool, the `direct_test.dart` suite, and the
-  `double_ratchet_test.dart` suite exercise X25519 DH ratchet +
-  symmetric-ratchet round-trips, out-of-order delivery, and skipped-key
-  storage. The demo's "forward secrecy survives compromise at message N"
-  frame is honest for both pre-compromise (prior messages still decrypt)
-  AND post-compromise (the next round-trip re-seeds the chain via the
-  DH ratchet).
+**The demo's "forward secrecy" claim:**
+
+The `forward_secrecy_demo` tool and the `direct_test.dart` suite prove
+honest forward secrecy on the HKDF chain (prior messages still decrypt
+after a compromise at message N). The demo does **not** prove
+post-compromise security: production sends do not ratchet, so a leaked
+chain key still exposes future messages. The demo also does **not** prove
+the full Double Ratchet in production — the `double_ratchet_test.dart`
+suite proves the library round-trips, but the application has not been
+wired to call it.
 
 **For the judges**: STRESS-TEST §0 documents that the user chose
 spec-fidelity-over-safety on every trade-off, but D5's fallback rule was
 baked into the spec itself (hour-6 verdict + bind-the-fallback). The
-HKDF-chain binding-fallback is honored — it lives at
-`lib/crypto/direct.dart` and is exercised by the demo. The shipped
-implementation path goes further: ticket #13 (`cutrev-ratchet`)
-delivered the full Double Ratchet from scratch in pure Dart, which
-restores post-compromise security on top of the binding-fallback
-guarantees.
+HKDF-chain binding-fallback is honored — it is the production path,
+exercised by the demo, and tested by `direct_test.dart`. The user has
+the full Double Ratchet in tree as a library, and the from-scratch
+implementation delivered by ticket #13 (`cutrev-ratchet`) is the natural
+follow-up if the binding-fallback path is later swapped out. That swap
+is mechanical work (route `DirectSession` → `DoubleRatchetSession` in
+the two transport call sites) and is recorded as a follow-up ticket;
+it is not part of this build.
 
 ---
 
@@ -344,7 +340,7 @@ A brief map of the layers — for the detailed spec see
 |---|---|---|
 | **Identity** | Ed25519 + X25519 keypair generation, keypair storage in Keystore/Keychain, sender-id derivation | `lib/crypto/identity.dart` |
 | **BROADCAST crypto** | AES-256-GCM with per-channel key, channel-id bound as AAD, default public key shipped + custom channels (key gen + QR) | `lib/crypto/broadcast.dart` |
-| **DIRECT crypto** | HKDF-chain (D5 fallback) seeded by QR-derived shared secret, one-byte sender tag, per-message chain-key discard | `lib/crypto/` (wherever #13 lands) |
+| **DIRECT crypto** | Production uses HKDF-chain binding-fallback (`DirectSession`); full Double Ratchet (`DoubleRatchetSession`) exists as a tested library but is not transport-wired | `lib/crypto/direct.dart`, `lib/crypto/double_ratchet.dart` |
 | **Message schema** | 16-field JSON message with plaintext routing metadata + ciphertext payload + Ed25519 signature | `lib/models/message.dart` |
 | **Storage** | sqflite for messages / seen-cache / vault, flutter_secure_storage for keys | `lib/storage/` |
 | **Mesh** | Transport abstraction, Bluetooth-based store-and-forward, Bloom-filter peer-sync (primitive ships; handshake does not) | `lib/mesh/` |
@@ -370,7 +366,7 @@ Decisions per `.working-memory.md`:
 | D2 | Coordinator + build-agent in one process | confirmed |
 | D3 | Full Double Ratchet (no HKDF simplification in isolation) | **modified by D5** — see HKDF-chain fallback disclosure above |
 | D4 | Wrap existing Dart package, simplify if unusable | confirmed path; the simplification was triggered |
-| D5 | "Usable" bar = Double Ratchet + X3DH-bypassable + Flutter Android build | **FAIL** at hour 6 on the package path; ticket #13 (`cutrev-ratchet`) then implemented the full Double Ratchet from scratch in pure Dart, restoring post-compromise security on top of the binding-fallback. Full evidence: [`VERDICT.md`](VERDICT.md) |
+| D5 | "Usable" bar = Double Ratchet + X3DH-bypassable + Flutter Android build | **FAIL** at hour 6 on the package path; ticket #13 (`cutrev-ratchet`) shipped the full Double Ratchet from scratch in pure Dart as a tested library, but the production DIRECT code path still uses the binding-fallback HKDF-chain (no post-compromise security). See [D5 disclosure](#d5--double-ratchet-implementation-status-full-disclosure). |
 | D6 | Evidence Vault = text-only, separate surface, chat long-press shortcut | text-only vault and storage helpers ship; the UI surface is unfinished |
 | D7 | DTN = full Bloom filter at 2000-ID/24h window | Bloom-filter primitive ships (#10, FPR 1.40%); the peer-sync handshake on connect is unfinished |
 | D8 | Gateway = full toggle + safety + relay code | toggle UI + safety warning ship (#21); relay code path is stubbed |
@@ -622,10 +618,11 @@ MIT — see [`LICENSE`](LICENSE).
 - **অফলাইন মেশ মেসেজিং** — দুটো বা ততোধিক ফোন Bluetooth-এর মাধ্যমে
   মেসেজ পাঠায় ও রিলে করে, কোনো ইনফ্রাস্ট্রাকচার ছাড়াই।
 - **এন্ড-টু-এন্ড এনক্রিপশন** — BROADCAST (গ্রুপ) মেসেজের জন্য
-  AES-256-GCM, DIRECT (১:১) মেসেজের জন্য পিওর ডার্টে বাস্তবায়িত সম্পূর্ণ
-  Double Ratchet (X25519 DH ratchet + HKDF chain + skipped-key storage)।
-  আসল D5 বাইন্ডিং-ফলব্যাক HKDF চেইনটি legacy হিসেবে রাখা আছে
-  `lib/crypto/direct.dart`-এ।
+  AES-256-GCM, DIRECT (১:১) মেসেজের জন্য HKDF-চেইন binding-fallback
+  (`DirectSession` in `lib/crypto/direct.dart` — forward secrecy আছে,
+  post-compromise security নেই)। সম্পূর্ণ Double Ratchet
+  (`DoubleRatchetSession` in `lib/crypto/double_ratchet.dart`) পরীক্ষিত
+  লাইব্রেরি হিসেবে আছে, কিন্তু কোনো transport-এ wire করা হয়নি।
 - **সংযোগ-ফলব্যাক** — একটি SOS একসাথে মেশ, SMS ও ইন্টারনেট তিন
   রাস্তায়ই পাঠানোর চেষ্টা করে; ব্যবহারকারীকে পছন্দ করতে হয় না।
 - **টেক্সট-অনলি Evidence Vault** — আলাদা একটি সারফেস যেখানে ব্যবহারকারী
@@ -640,13 +637,15 @@ MIT — see [`LICENSE`](LICENSE).
 গেছে Dart-এ উপলব্ধ Signal Protocol প্যাকেজগুলোর (libsignal,
 libsignal_protocol_dart) কোনোটির পাবলিক API-তে X3DH বাইপাস করার
 পথ নেই, কিন্তু স্পেকে X3DH স্কিপ করা হয়েছে। তাই D5-এর বাধ্যতামূলক
-ফলব্যাক অনুযায়ী HKDF চেইন রাখা হয়েছে `lib/crypto/direct.dart`-এ। এরপর
-টিকেট #13 (`cutrev-ratchet`) পিওর ডার্টে সম্পূর্ণ Double Ratchet বাস্তবায়ন
-করেছে `lib/crypto/double_ratchet.dart`-এ (X25519 DH ratchet + symmetric
-ratchet + HKDF chain + skipped-key storage)। এই বিল্ডে যেটা আসলে শিপ
-হয়েছে সেটা হলো সম্পূর্ণ Double Ratchet — যা forward secrecy এবং
-post-compromise security দুটোই দেয় (DH ratchet পরবর্তী round-trip-এ
-চেইন পুনরায় সিড করে)। বিস্তারিত VERDICT.md-তে আছে।
+ফলব্যাক অনুযায়ী HKDF চেইন রাখা হয়েছে `lib/crypto/direct.dart`-এ
+(`DirectSession`) — এটা প্রোডাকশন DIRECT পাথে ব্যবহৃত হচ্ছে
+(`lib/sms/direct_adapter.dart`, `lib/transport/internet.dart`)। এরপর
+টিকেট #13 (`cutrev-ratchet`) পিওর ডার্টে সম্পূর্ণ Double Ratchet
+বাস্তবায়ন করেছে `lib/crypto/double_ratchet.dart`-এ
+(`DoubleRatchetSession`)। এটা পরীক্ষিত (`double_ratchet_test.dart`)
+কিন্তু **library-only** — কোনো transport-এ wire করা হয়নি। তাই
+এই বিল্ড প্রোডাকশনে যা আসলে ব্যবহার করে সেটা forward secrecy আছে
+কিন্তু post-compromise security নেই। বিস্তারিত VERDICT.md-তে আছে।
 
 ### যা শিপ হয়েছে এবং যা হয়নি
 

@@ -118,9 +118,9 @@ class _FirstLaunchGateState extends State<_FirstLaunchGate> {
 }
 
 // `ProviderScope` is mounted higher up in the widget tree
-// (RelayLinkApp.build above), so child widgets like `_DisclosureOverlayHome`
-// can call `ref.watch(...)` via ConsumerWidget. Kept documented here so
-// the layering stays obvious when future tickets add more state.
+// (RelayLinkApp.build above). `_DisclosureOverlayHome` creates a nested
+// scope with the latest device-capability override so downstream consumers
+// such as `HomeScreen` remain purely declarative.
 
 /// Renders the home page, and overlays the first-launch disclosure if the
 /// user has not yet seen it. Once the overlay is shown, the home page is
@@ -160,22 +160,26 @@ class _DisclosureOverlayHomeState extends State<_DisclosureOverlayHome> {
 
   @override
   Widget build(BuildContext context) {
-    return const RelayLinkHome();
+    // Push the freshly-detected capability table into the Riverpod scope
+    // *declaratively* via an override, rather than mutating provider state
+    // from inside `build()` (which is a Riverpod anti-pattern — the
+    // assignment would re-fire on every rebuild). When `widget.capabilities`
+    // changes (e.g. after a lifecycle observation tick), the rebuilt
+    // ProviderScope re-issues the override and downstream consumers rerun.
+    return ProviderScope(
+      overrides: [
+        deviceCapabilitiesProvider.overrideWith((ref) => widget.capabilities),
+      ],
+      child: const RelayLinkHome(),
+    );
   }
 }
 
-class RelayLinkHome extends ConsumerWidget {
+class RelayLinkHome extends StatelessWidget {
   const RelayLinkHome({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // Seed the capabilities provider from the platform-detected table so
-    // the home screen's transport chips reflect what this device can
-    // actually do. Done here (rather than in main()) because the gate
-    // above already computed `detectCapabilities()` and we want to keep
-    // that as the single source of truth.
-    ref.watch(deviceCapabilitiesProvider.notifier).state =
-        detectCapabilities();
+  Widget build(BuildContext context) {
     return const HomeScreen();
   }
 }
