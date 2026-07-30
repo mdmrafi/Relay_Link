@@ -1,16 +1,20 @@
-// RelayLink — Ticket #01 scaffold home screen + #30 capability disclosure gate.
+// RelayLink — Ticket #01 scaffold home screen + #30 capability disclosure
+// gate + #38 home screen.
 //
-// This is a placeholder home screen so the scaffold compiles and runs. Later
-// tickets (#38-#42) will replace this with the actual navigation surface.
+// `RelayLinkHome` renders the real home screen from `lib/screens/home.dart`
+// once the first-launch capability disclosure has been dismissed. The
+// older placeholder (Ticket #01) is gone; #38 owns the surface.
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:relaylink/alerts/allowlist.dart';
 import 'package:relaylink/capabilities/detect.dart';
 import 'package:relaylink/channels/keys.dart';
 import 'package:relaylink/screens/capability_disclosure.dart';
+import 'package:relaylink/screens/home.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +54,7 @@ class RelayLinkApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const _FirstLaunchGate(),
+      home: const ProviderScope(child: _FirstLaunchGate()),
     );
   }
 }
@@ -94,6 +98,11 @@ class _FirstLaunchGateState extends State<_FirstLaunchGate> {
   }
 }
 
+// `ProviderScope` is mounted higher up in the widget tree
+// (RelayLinkApp.build above), so child widgets like `_DisclosureOverlayHome`
+// can call `ref.watch(...)` via ConsumerWidget. Kept documented here so
+// the layering stays obvious when future tickets add more state.
+
 /// Renders the home page, and overlays the first-launch disclosure if the
 /// user has not yet seen it. Once the overlay is shown, the home page is
 /// built first so the disclosure has something to pop back to.
@@ -136,37 +145,18 @@ class _DisclosureOverlayHomeState extends State<_DisclosureOverlayHome> {
   }
 }
 
-class RelayLinkHome extends StatelessWidget {
+class RelayLinkHome extends ConsumerWidget {
   const RelayLinkHome({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                'RelayLink',
-                style: Theme.of(context).textTheme.displayLarge?.copyWith(
-                      fontSize: 56,
-                    ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Offline mesh messaging · End-to-end encrypted',
-                style: TextStyle(
-                  color: const Color(0xFF9AA4B2),
-                  fontSize: 14,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Seed the capabilities provider from the platform-detected table so
+    // the home screen's transport chips reflect what this device can
+    // actually do. Done here (rather than in main()) because the gate
+    // above already computed `detectCapabilities()` and we want to keep
+    // that as the single source of truth.
+    ref.watch(deviceCapabilitiesProvider.notifier).state =
+        detectCapabilities();
+    return const HomeScreen();
   }
 }
