@@ -323,4 +323,72 @@ class DirectSession {
     required bool isInitiator,
   }) =>
       create(sharedSecret, isInitiator: isInitiator);
+
+  /// Serialize the live chain state to a portable byte blob suitable for
+  /// secure-storage persistence. The blob is JSON so it survives schema
+  /// bumps cleanly; the chain keys themselves are sensitive, so the
+  /// caller MUST store the result in an encrypted-at-rest location
+  /// (e.g. `flutter_secure_storage`), never in plain sqflite.
+  ///
+  /// Wire format:
+  ///   {
+  ///     "v": 1,
+  ///     "send_chain": base64,
+  ///     "send_counter": int,
+  ///     "recv_chain": base64,
+  ///     "recv_counter": int,
+  ///     "initiator_tag": int
+  ///   }
+  Map<String, Object?> toJson() => <String, Object?>{
+        'v': 1,
+        'send_chain': base64.encode(_sendChainKey),
+        'send_counter': _sendCounter,
+        'recv_chain': base64.encode(_recvChainKey),
+        'recv_counter': _recvCounter,
+        'initiator_tag': _initiatorTag,
+      };
+
+  /// Reconstruct a session from a blob produced by [toJson]. Throws
+  /// [FormatException] on schema mismatch or field corruption.
+  static Future<DirectSession> fromJson(Map<String, Object?> json) async {
+    final version = json['v'];
+    if (version is! int || version != 1) {
+      throw FormatException(
+        'DirectSession: unsupported schema version $version',
+      );
+    }
+    final sendChainB64 = json['send_chain'];
+    final sendCounter = json['send_counter'];
+    final recvChainB64 = json['recv_chain'];
+    final recvCounter = json['recv_counter'];
+    final initiatorTag = json['initiator_tag'];
+    if (sendChainB64 is! String ||
+        recvChainB64 is! String ||
+        sendCounter is! int ||
+        recvCounter is! int ||
+        initiatorTag is! int) {
+      throw const FormatException(
+        'DirectSession: malformed JSON — wrong field types',
+      );
+    }
+    final sendChain = base64.decode(sendChainB64);
+    final recvChain = base64.decode(recvChainB64);
+    if (sendChain.length != 32 || recvChain.length != 32) {
+      throw const FormatException(
+        'DirectSession: chain keys must be 32 bytes',
+      );
+    }
+    if (initiatorTag != _kInitiatorTag && initiatorTag != _kResponderTag) {
+      throw const FormatException(
+        'DirectSession: initiator_tag must be 0x01 or 0x02',
+      );
+    }
+    return DirectSession._(
+      Uint8List.fromList(sendChain),
+      sendCounter,
+      Uint8List.fromList(recvChain),
+      recvCounter,
+      initiatorTag,
+    );
+  }
 }
