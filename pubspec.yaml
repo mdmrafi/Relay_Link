@@ -74,6 +74,9 @@ dev_dependencies:
   libsignal_protocol_dart: ^0.8.2
   sqflite_common_ffi: ^2.3.0
 
+  # Ticket #07 — deterministic backoff timing in discovery_test.dart.
+  fake_async: ^1.3.3
+
 flutter:
   uses-material-design: true
 
