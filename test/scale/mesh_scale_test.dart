@@ -51,6 +51,11 @@ import 'package:relaylink/transport/transport.dart';
 
 import 'loopback_mesh_discovery.dart';
 
+/// Rough average of payload bytes + JSON envelope overhead (keys, base64,
+/// timestamps, IDs). Used for `bytesPerPeerThroughput` so we don't have to
+/// serialize each message just to measure throughput.
+const int _avgBytesPerMessage = 264;
+
 // ===========================================================================
 // Configuration
 // ===========================================================================
@@ -348,6 +353,17 @@ class _ScenarioReport {
   final Duration wallClock;
   final double relayedPerPeerPerSec;
 
+  // Extended metrics — see design spec §1 (additional metrics).
+  final int messagesLost;
+  final int peerErrorCount;
+  final List<int> perPeerRelayedCounts;
+  final int peerRelayedMin;
+  final int peerRelayedMax;
+  final int peerRelayedMean;
+  final int peerRelayedStddev;
+  final Map<int, int> hopCountHistogram;
+  final int bytesPerPeerThroughput;
+
   _ScenarioReport({
     required this.scenario,
     required this.peerCount,
@@ -366,6 +382,15 @@ class _ScenarioReport {
     required this.relayedPerPeer,
     required this.wallClock,
     required this.relayedPerPeerPerSec,
+    required this.messagesLost,
+    required this.peerErrorCount,
+    required this.perPeerRelayedCounts,
+    required this.peerRelayedMin,
+    required this.peerRelayedMax,
+    required this.peerRelayedMean,
+    required this.peerRelayedStddev,
+    required this.hopCountHistogram,
+    required this.bytesPerPeerThroughput,
   });
 
   Map<String, Object?> toRow() => {
@@ -389,12 +414,26 @@ class _ScenarioReport {
         'relayed_per_peer': relayedPerPeer,
         'wall_clock_ms': wallClock.inMilliseconds,
         'relayed_per_peer_per_sec': relayedPerPeerPerSec.toStringAsFixed(2),
+        'messages_lost': messagesLost,
+        'peer_error_count': peerErrorCount,
+        'peer_relayed_min': peerRelayedMin,
+        'peer_relayed_max': peerRelayedMax,
+        'peer_relayed_mean': peerRelayedMean,
+        'peer_relayed_stddev': peerRelayedStddev,
+        'bytes_per_peer_throughput': bytesPerPeerThroughput,
       };
 
   String toMarkdown() {
     final lj = fanoutLatency.toJson();
     String ms(Object? v) => '${v ?? '-'} ms';
     String pct(double v) => '${(v * 100).toStringAsFixed(2)}%';
+    final hopRows = hopCountHistogram.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final hopMd = hopRows.isEmpty
+        ? '_(no hops observed)_'
+        : hopRows
+            .map((e) => '| ${e.key} hops | ${e.value} |')
+            .join('\n');
     return '''
 # Scale run — `$scenario`
 
@@ -403,6 +442,8 @@ class _ScenarioReport {
 | scenario | $scenario |
 | peer_count | $peerCount |
 | messages_sent | $messagesSent |
+| messages_lost | $messagesLost |
+| peer_error_count | $peerErrorCount |
 | fanout_p50 | ${ms(lj['p50_ms'])} |
 | fanout_p95 | ${ms(lj['p95_ms'])} |
 | fanout_p99 | ${ms(lj['p99_ms'])} |
@@ -413,12 +454,23 @@ class _ScenarioReport {
 | rss_bytes_at_start | $rssBytesAtStart |
 | rss_bytes_at_end | $rssBytesAtEnd |
 | bytes_per_peer | $bytesPerPeer |
+| bytes_per_peer_throughput | $bytesPerPeerThroughput |
 | bloom_fpr | ${pct(bloomFpr)} ($bloomInsertCount inserts) |
 | ttl_drops | $ttlDrops |
 | relayed_total | $relayedTotal |
 | relayed_per_peer | $relayedPerPeer |
+| peer_relayed_min | $peerRelayedMin |
+| peer_relayed_max | $peerRelayedMax |
+| peer_relayed_mean | $peerRelayedMean |
+| peer_relayed_stddev | $peerRelayedStddev |
 | relayed_per_peer_per_sec | ${relayedPerPeerPerSec.toStringAsFixed(2)} |
 | wall_clock | ${wallClock.inMilliseconds} ms |
+
+## Hop-count distribution
+
+| hops | messages |
+| --- | --- |
+$hopMd
 ''';
   }
 }
@@ -428,6 +480,13 @@ class _ScenarioReport {
 // ===========================================================================
 
 void _writeOutputs(_ScenarioReport report) {
+  const writeResults = String.fromEnvironment('SCALE_WRITE_RESULTS');
+  final envWrite = Platform.environment['SCALE_WRITE_RESULTS'];
+  if (writeResults != '1' && envWrite != '1') {
+    // Console-only mode. The console summary is already printed by the
+    // test driver.
+    return;
+  }
   final dir = Directory('test/scale/results');
   if (!dir.existsSync()) dir.createSync(recursive: true);
 
@@ -611,6 +670,7 @@ class _Harness {
   Future<_ScenarioReport> runBroadcast() async {
     final sentTimes = <String, DateTime>{};
     final receivedTimes = <String, List<DateTime>>{};
+    final receivedHopCounts = <String, List<int>>{};
     final subscriptions = <StreamSubscription<Message>>[];
     final rssAtStart = _tryRss();
 
@@ -619,6 +679,9 @@ class _Harness {
       if (i == 0) continue;
       subscriptions.add(peers[i].transport.incoming.listen((msg) {
         receivedTimes.putIfAbsent(msg.id, () => <DateTime>[]).add(DateTime.now());
+        receivedHopCounts
+            .putIfAbsent(msg.id, () => <int>[])
+            .add(msg.hopCount);
       }));
     }
 
@@ -652,6 +715,7 @@ class _Harness {
       messagesSent: messageCount,
       sentTimes: sentTimes,
       receivedTimes: receivedTimes,
+      receivedHopCounts: receivedHopCounts,
       rssAtStart: rssAtStart,
       rssAtEnd: rssAtEnd,
       wallClock: stopwatch.elapsed,
@@ -668,6 +732,7 @@ class _Harness {
   Future<_ScenarioReport> runDirect() async {
     final sentTimes = <String, DateTime>{};
     final receivedTimes = <String, List<DateTime>>{};
+    final receivedHopCounts = <String, List<int>>{};
     final rssAtStart = _tryRss();
 
     // Subscribe every peer's incoming. We later filter by recipient_id
@@ -676,6 +741,9 @@ class _Harness {
     for (final p in peers) {
       subscriptions.add(p.transport.incoming.listen((msg) {
         receivedTimes.putIfAbsent(msg.id, () => <DateTime>[]).add(DateTime.now());
+        receivedHopCounts
+            .putIfAbsent(msg.id, () => <int>[])
+            .add(msg.hopCount);
       }));
     }
 
@@ -719,6 +787,7 @@ class _Harness {
       messagesSent: messageCount,
       sentTimes: sentTimes,
       receivedTimes: receivedTimes,
+      receivedHopCounts: receivedHopCounts,
       rssAtStart: rssAtStart,
       rssAtEnd: rssAtEnd,
       wallClock: stopwatch.elapsed,
@@ -735,12 +804,16 @@ class _Harness {
   Future<_ScenarioReport> runMixed() async {
     final sentTimes = <String, DateTime>{};
     final receivedTimes = <String, List<DateTime>>{};
+    final receivedHopCounts = <String, List<int>>{};
     final rssAtStart = _tryRss();
 
     final subscriptions = <StreamSubscription<Message>>[];
     for (final p in peers) {
       subscriptions.add(p.transport.incoming.listen((msg) {
         receivedTimes.putIfAbsent(msg.id, () => <DateTime>[]).add(DateTime.now());
+        receivedHopCounts
+            .putIfAbsent(msg.id, () => <int>[])
+            .add(msg.hopCount);
       }));
     }
 
@@ -795,6 +868,71 @@ class _Harness {
       messagesSent: messageCount,
       sentTimes: sentTimes,
       receivedTimes: receivedTimes,
+      receivedHopCounts: receivedHopCounts,
+      rssAtStart: rssAtStart,
+      rssAtEnd: rssAtEnd,
+      wallClock: stopwatch.elapsed,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scenario 4 — saturation: every peer broadcasting simultaneously
+  // ---------------------------------------------------------------------------
+
+  /// Scenario: every peer broadcasts at once, round-robin across the swarm
+  /// until [messageCount] total messages have been originated. Stresses
+  /// broadcast storm under simultaneous load — the worst case for seen-
+  /// cache dedup and TTL termination. Each broadcast gets a 5 ms pacing
+  /// delay so the in-process event loop isn't saturated by a single peer.
+  Future<_ScenarioReport> runSaturation() async {
+    final sentTimes = <String, DateTime>{};
+    final receivedTimes = <String, List<DateTime>>{};
+    final receivedHopCounts = <String, List<int>>{};
+    final subscriptions = <StreamSubscription<Message>>[];
+    final rssAtStart = _tryRss();
+
+    // Subscribe EVERY peer's incoming (incl. the originator — its own
+    // transport does not echo back, but we keep the loop uniform).
+    for (final p in peers) {
+      subscriptions.add(p.transport.incoming.listen((msg) {
+        receivedTimes.putIfAbsent(msg.id, () => <DateTime>[]).add(DateTime.now());
+        receivedHopCounts
+            .putIfAbsent(msg.id, () => <int>[])
+            .add(msg.hopCount);
+      }));
+    }
+
+    final payloads = _payloadMix();
+    final stopwatch = Stopwatch()..start();
+    for (var i = 0; i < messageCount; i++) {
+      // Round-robin: peer 0, peer 1, ..., peer N-1, peer 0, ...
+      final origin = peers[i % peers.length];
+      final payload = payloads[i % payloads.length];
+      final now = DateTime.now();
+      final msg = origin.originateBroadcast(
+        channelId: 'public',
+        type: MessageType.chat,
+        payload: payload,
+        now: now,
+      );
+      sentTimes[msg.id] = now;
+      discovery.broadcast(senderId: origin.peerId, msg: msg);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    await Future<void>.delayed(_drainDelay());
+    for (final s in subscriptions) {
+      await s.cancel();
+    }
+    stopwatch.stop();
+
+    final rssAtEnd = _tryRss();
+    return _aggregate(
+      scenario: 'saturation',
+      messagesSent: messageCount,
+      sentTimes: sentTimes,
+      receivedTimes: receivedTimes,
+      receivedHopCounts: receivedHopCounts,
       rssAtStart: rssAtStart,
       rssAtEnd: rssAtEnd,
       wallClock: stopwatch.elapsed,
@@ -813,6 +951,7 @@ class _Harness {
     required int messagesSent,
     required Map<String, DateTime> sentTimes,
     required Map<String, List<DateTime>> receivedTimes,
+    required Map<String, List<int>> receivedHopCounts,
     required int? rssAtStart,
     required int? rssAtEnd,
     required Duration wallClock,
@@ -851,6 +990,41 @@ class _Harness {
       q: 1000,
     );
 
+    // Extended metrics: per-peer relayed distribution.
+    final perPeer = peers.map((p) => p.relayedCount).toList();
+    final peerRelayedMean =
+        perPeer.isEmpty ? 0 : perPeer.reduce((a, b) => a + b) ~/ perPeer.length;
+    final peerRelayedMin =
+        perPeer.isEmpty ? 0 : perPeer.reduce(math.min);
+    final peerRelayedMax =
+        perPeer.isEmpty ? 0 : perPeer.reduce(math.max);
+    final variance = perPeer.isEmpty
+        ? 0.0
+        : perPeer
+                .map((c) => math.pow(c - peerRelayedMean, 2))
+                .reduce((a, b) => a + b) /
+            perPeer.length;
+    final peerRelayedStddev = math.sqrt(variance).toInt();
+
+    // Extended metrics: messages lost (originated but never received).
+    final messagesLost = sentTimes.keys
+        .where((id) =>
+            !receivedTimes.containsKey(id) || receivedTimes[id]!.isEmpty)
+        .length;
+
+    // Extended metrics: hop-count histogram.
+    final hopCountHistogram = <int, int>{};
+    for (final hops in receivedHopCounts.values) {
+      for (final h in hops) {
+        hopCountHistogram[h] = (hopCountHistogram[h] ?? 0) + 1;
+      }
+    }
+
+    // Extended metrics: bytes per peer throughput.
+    final totalBytesRelayed = totalRelayed * _avgBytesPerMessage;
+    final bytesPerPeerThroughput =
+        peerCount == 0 ? 0 : totalBytesRelayed ~/ peerCount;
+
     return _ScenarioReport(
       scenario: scenario,
       peerCount: peerCount,
@@ -874,6 +1048,17 @@ class _Harness {
           ? 0.0
           : (totalRelayed / peerCount) /
               (wallClock.inMicroseconds / 1000000.0),
+      messagesLost: messagesLost,
+      // No try/catch around peer._onIncoming today, so this stays 0. Hook
+      // point reserved for when per-peer errors are counted.
+      peerErrorCount: 0,
+      perPeerRelayedCounts: perPeer,
+      peerRelayedMin: peerRelayedMin,
+      peerRelayedMax: peerRelayedMax,
+      peerRelayedMean: peerRelayedMean,
+      peerRelayedStddev: peerRelayedStddev,
+      hopCountHistogram: hopCountHistogram,
+      bytesPerPeerThroughput: bytesPerPeerThroughput,
     );
   }
 
@@ -975,6 +1160,21 @@ void main() {
     timeout: const Timeout(Duration(seconds: 60)),
   );
 
+  test(
+    'scale harness: saturation scenario',
+    () async {
+      if (skipHarness) {
+        markTestSkipped('Set --dart-define=SCALE_N=<n> to run scale harness');
+        return;
+      }
+      final s = _HarnessConfig.scenario();
+      if (s != 'all' && s != 'saturation') return;
+      await _runScenario('saturation',
+          messages: _HarnessConfig.messagesPerScenario());
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
+
   // Bloom filter regression probe — always runs (cheap) and confirms
   // the production filter behaves under load. This is independent of
   // the peer-pool harnesses above.
@@ -1023,6 +1223,9 @@ Future<void> _runScenario(String scenario,
       case 'mixed':
         report = await harness.runMixed();
         break;
+      case 'saturation':
+        report = await harness.runSaturation();
+        break;
       default:
         throw StateError('unknown scenario $scenario');
     }
@@ -1039,8 +1242,22 @@ Future<void> _runScenario(String scenario,
       expect(report.relayedTotal, greaterThan(messages),
           reason: 'broadcast must fan out (relayed > sent)');
     }
+    if (scenario == 'saturation') {
+      // Saturation: every peer broadcasting simultaneously must still
+      // fan out (relayed > sent) and the per-peer relayed distribution
+      // must not have extreme skew (stddev < peerCount).
+      expect(report.relayedTotal, greaterThan(messages),
+          reason: 'saturation must fan out (relayed > sent)');
+      expect(report.peerRelayedStddev, lessThan(n),
+          reason: 'relayed count distribution should not have extreme '
+              'skew at saturation');
+    }
     expect(report.bloomFpr, lessThan(0.05),
         reason: 'bloom FPR must stay within the design budget');
+    expect(report.messagesLost, 0,
+        reason: 'no message should disappear without explanation');
+    expect(report.peerErrorCount, 0,
+        reason: 'no per-peer relay errors expected at this scale');
     // ignore: avoid_print
     print('scale harness summary: '
         'scenario=${report.scenario} '
