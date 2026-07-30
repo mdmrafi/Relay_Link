@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:relaylink/alerts/allowlist.dart';
 import 'package:relaylink/capabilities/detect.dart';
+import 'package:relaylink/capabilities/observer.dart';
 import 'package:relaylink/channels/keys.dart';
 import 'package:relaylink/screens/capability_disclosure.dart';
 import 'package:relaylink/screens/home.dart';
@@ -73,10 +74,21 @@ class _FirstLaunchGate extends StatefulWidget {
 class _FirstLaunchGateState extends State<_FirstLaunchGate> {
   bool? _seen;
 
+  /// Watches app lifecycle events and re-runs capability detection so the
+  /// home screen (#38) auto-refreshes when capabilities change. See
+  /// `lib/capabilities/observer.dart`.
+  final CapabilityObserver _capabilitiesObserver = CapabilityObserver();
+
   @override
   void initState() {
     super.initState();
     _checkSeen();
+  }
+
+  @override
+  void dispose() {
+    _capabilitiesObserver.dispose();
+    super.dispose();
   }
 
   Future<void> _checkSeen() async {
@@ -91,9 +103,16 @@ class _FirstLaunchGateState extends State<_FirstLaunchGate> {
         body: Center(child: CircularProgressIndicator()),
       );
     }
-    return _DisclosureOverlayHome(
-      seen: _seen!,
-      capabilities: detectCapabilities(),
+    return StreamBuilder<DeviceCapabilities>(
+      initialData: _capabilitiesObserver.current,
+      stream: _capabilitiesObserver.stream,
+      builder: (context, snapshot) {
+        final capabilities = snapshot.data ?? _capabilitiesObserver.current;
+        return _DisclosureOverlayHome(
+          seen: _seen!,
+          capabilities: capabilities,
+        );
+      },
     );
   }
 }
