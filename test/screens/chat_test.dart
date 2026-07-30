@@ -456,6 +456,17 @@ void main() {
 
       expect(find.text('1 message'), findsOneWidget);
     });
+
+    testWidgets('composer TextField exposes a labelText for screen readers',
+        (WidgetTester tester) async {
+      final controller = LocalChatController();
+      await _pump(tester, ChatScreen(controller: controller));
+
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey<String>('chatComposerField')),
+      );
+      expect(field.decoration?.labelText, 'Message');
+    });
   });
 
   group('ChatScreen — origin icons', () {

@@ -465,47 +465,56 @@ class _TransportChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final color =
         available ? const Color(0xFF66BB6A) : const Color(0xFFEF5350);
+    // Self-contained screen-reader label: name + on/off so the row is
+    // announced correctly even when focused out of context.
+    final semanticsLabel =
+        'Transport: $label, ${available ? 'available' : 'unavailable'} ($sublabel)';
     return Expanded(
-      child: InkWell(
-        key: ValueKey<String>('transportChip::$testKey'),
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 4),
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1F2933),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: color.withValues(alpha: 0.5)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: <Widget>[
-                  Icon(
-                    available ? Icons.check_circle : Icons.cancel,
-                    color: color,
-                    size: 18,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    label,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                sublabel,
-                key: ValueKey<String>('transportChipSub::$testKey'),
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF9AA4B2),
+      child: Semantics(
+        label: semanticsLabel,
+        button: true,
+        excludeSemantics: false,
+        child: InkWell(
+          key: ValueKey<String>('transportChip::$testKey'),
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1F2933),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: color.withValues(alpha: 0.5)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: <Widget>[
+                    Icon(
+                      available ? Icons.check_circle : Icons.cancel,
+                      color: color,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      label,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 4),
+                Text(
+                  sublabel,
+                  key: ValueKey<String>('transportChipSub::$testKey'),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF9AA4B2),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

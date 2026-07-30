@@ -541,6 +541,7 @@ class _VaultComposeScreenState extends State<VaultComposeScreen> {
                 maxLines: 8,
                 minLines: 4,
                 decoration: const InputDecoration(
+                  labelText: 'Evidence',
                   hintText: 'Type the evidence here. Plaintext is encrypted '
                       'on this device before being stored.',
                   border: OutlineInputBorder(),

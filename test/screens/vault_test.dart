@@ -396,6 +396,27 @@ void main() {
       expect(records.first.recipientId, isNull,
           reason: 'Self should not bind a recipient device id');
     });
+
+    testWidgets('compose TextField exposes a labelText for screen readers',
+        (WidgetTester tester) async {
+      final f = await buildFixtures(tester);
+      addTearDown(() => disposeFixtures(tester, f));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: VaultComposeScreen(
+            store: f.store,
+            contacts: const <ContactRecord>[],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final field = tester.widget<TextField>(
+        find.byKey(kVaultComposeTextFieldKey),
+      );
+      expect(field.decoration?.labelText, 'Evidence');
+    });
   });
 
   group('VaultListScreen — integration with the FAB → compose flow', () {

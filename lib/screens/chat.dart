@@ -615,6 +615,7 @@ class _ComposerBar extends StatelessWidget {
                   key: const ValueKey<String>('chatComposerField'),
                   controller: controller,
                   decoration: const InputDecoration(
+                    labelText: 'Message',
                     hintText: 'Message',
                     border: OutlineInputBorder(),
                     isDense: true,
@@ -741,5 +742,3 @@ IconData _originIcon(MessageOrigin o) {
   }
 }
 
-// Encode the body using UTF-8 so the payload round-trips through the model.
-Uint8List _utf8(String s) => Uint8List.fromList(utf8.encode(s));

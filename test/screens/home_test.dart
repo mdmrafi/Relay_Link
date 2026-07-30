@@ -224,6 +224,50 @@ void main() {
       await tester.pump();
       expect(tapped, <HomeTransport>[HomeTransport.internet]);
     });
+
+    testWidgets('each chip exposes a Semantics label with transport + state',
+        (WidgetTester tester) async {
+      await _pumpHome(
+        tester,
+        overrides: baseOverrides(
+          capabilities: DeviceCapabilities.forPlatform('android'),
+          internetReachable: true,
+          // smsAvailable left false → sms chip is "off", mesh/internet "on".
+        ),
+      );
+
+      for (final t in HomeTransport.values) {
+        final chipKey = ValueKey<String>('transportChip::${t.name}');
+        expect(find.byKey(chipKey), findsOneWidget,
+            reason: 'missing chip for transport ${t.name}');
+
+        // Walk up to the Semantics node that wraps the InkWell. The
+        // label must be a non-empty string that mentions both the
+        // transport name and the on/off state so screen readers can
+        // announce the row out of context.
+        final ancestors = tester
+            .widgetList<Semantics>(
+              find.ancestor(
+                of: find.byKey(chipKey),
+                matching: find.byType(Semantics),
+              ),
+            )
+            .where((s) => (s.properties.label ?? '').trim().isNotEmpty);
+
+        expect(ancestors, isNotEmpty,
+            reason:
+                'transport chip ${t.name} must be wrapped in a Semantics with a label');
+
+        final label = ancestors.first.properties.label!;
+        expect(label, isNotEmpty,
+            reason: 'transport chip ${t.name} must have a Semantics label');
+        expect(label.toLowerCase(), contains(t.name.toLowerCase()),
+            reason: 'transport chip label should mention "${t.name}"');
+        expect(label.toLowerCase(), anyOf(contains('on'), contains('off')),
+            reason:
+                'transport chip ${t.name} label should mention on/off state');
+      }
+    });
   });
 
   group('HomeScreen — peer count + activity', () {

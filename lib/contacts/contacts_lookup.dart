@@ -104,8 +104,11 @@ class InMemoryContactsStore implements ContactsLookup {
   ContactRecord? lookupByDeviceId(String deviceId) => _byDeviceId[deviceId];
 
   /// Add or replace a contact. Returns the previous record (if any).
-  ContactRecord? upsert(ContactRecord record) =>
-      _byDeviceId[record.deviceId] = record;
+  ContactRecord? upsert(ContactRecord record) {
+    final previous = _byDeviceId[record.deviceId];
+    _byDeviceId[record.deviceId] = record;
+    return previous;
+  }
 
   /// Number of contacts currently stored.
   int get length => _byDeviceId.length;
