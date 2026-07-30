@@ -31,7 +31,6 @@ Future<Uint8List> _x25519Ecdh() async {
   final x = X25519();
   final a = await x.newKeyPair();
   final b = await x.newKeyPair();
-  final aPub = await a.extractPublicKey();
   final bPub = await b.extractPublicKey();
   final s = await x.sharedSecretKey(
     keyPair: a,
