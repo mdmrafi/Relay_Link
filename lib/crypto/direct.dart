@@ -124,6 +124,20 @@ class DirectMessage {
 /// (which it advances on every [encrypt]) and a receiver chain (which it
 /// advances on every [decrypt]). The two chains are NOT the same because
 /// the direction byte is mixed into the root derivation.
+///
+/// NOTE: this class is the LEGACY HKDF-chain fallback from the original
+/// ticket #13 work. The full Double Ratchet has since been implemented
+/// and lives at `package:relaylink/crypto/double_ratchet.dart`
+/// ([DoubleRatchetSession]). Use [DoubleRatchetSession] for new code
+/// that needs post-compromise secrecy; this class is preserved verbatim
+/// because the on-the-wire format it produces is still consumed by
+/// older app installs and is exercised by
+/// `test/crypto/direct_test.dart`. The alias [DirectSession.legacy] is
+/// provided as an explicit entry point:
+///
+/// ```dart
+/// final alice = await DirectSession.legacy(seed, isInitiator: true);
+/// ```
 class DirectSession {
   Uint8List _sendChainKey;
   int _sendCounter;
@@ -144,6 +158,14 @@ class DirectSession {
   /// [isInitiator]: true if the user initiated the QR exchange (Alice in
   /// the canonical demo), false if they responded to it (Bob). The two
   /// sides MUST use opposite values for the chains to be independent.
+  ///
+  /// This is the LEGACY HKDF-chain fallback. For new code that needs
+  /// post-compromise secrecy, use
+  /// `package:relaylink/crypto/double_ratchet.dart` instead. This
+  /// factory is preserved for backward compatibility with the
+  /// integrations in `lib/sms/direct_adapter.dart` and
+  /// `lib/transport/internet.dart` and the unit tests in
+  /// `test/crypto/direct_test.dart`.
   static Future<DirectSession> create(
     List<int> sharedSecret, {
     required bool isInitiator,
@@ -291,4 +313,14 @@ class DirectSession {
     );
     return Uint8List.fromList(derived.bytes);
   }
+
+  /// Explicit synonym for [create]. Surfaces to callers that this is
+  /// the LEGACY HKDF-chain fallback rather than the modern Double
+  /// Ratchet (which lives in
+  /// `package:relaylink/crypto/double_ratchet.dart`).
+  static Future<DirectSession> legacy(
+    List<int> sharedSecret, {
+    required bool isInitiator,
+  }) =>
+      create(sharedSecret, isInitiator: isInitiator);
 }
