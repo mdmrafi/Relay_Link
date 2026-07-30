@@ -16,10 +16,12 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../contacts/contacts_lookup.dart';
 import '../models/message.dart';
 import 'vault_record.dart';
 
@@ -44,7 +46,10 @@ class LocalDb {
   ///     single ciphertext column, no encryption envelope).
   ///   * v2 — Ticket #31: vault_records gains `per_record_key_wrapped`,
   ///     `nonce`, and `aad` columns for the AES-256-GCM envelope.
-  static const int schemaVersion = 2;
+  ///   * v3 — Pairing: `contacts` table added for the DIRECT-crypto
+  ///     bootstrap flow (this plan). Stores device-id, display name, phone
+  ///     number, X25519 public key, and the pairing timestamp.
+  static const int schemaVersion = 3;
 
   /// Default on-device database name. Lives under the platform's
   /// `getDatabasesPath()` (sqflite handles iOS/Android/desktop paths).
@@ -86,10 +91,11 @@ class LocalDb {
       ON vault_records(created_at);
   ''';
 
-  /// v2 schema for new installs. Matches v1 but with the new columns
-  /// required by the Ticket #31 AES-256-GCM envelope. Fresh installs
-  /// land here directly so `migrate()` can stay idempotent.
-  static const String _createV2 = '''
+  /// v3 schema for new installs. Adds the `contacts` table for paired
+  /// device-id → (display name, phone, X25519 pub key, paired-at).
+  /// Includes the v1 + v2 message/vault tables so this is the single
+  /// source of truth for fresh installs.
+  static const String _createV3 = '''
     CREATE TABLE IF NOT EXISTS messages (
       id          TEXT PRIMARY KEY,
       json        TEXT NOT NULL,
@@ -115,6 +121,16 @@ class LocalDb {
     );
     CREATE INDEX IF NOT EXISTS vault_records_created_at_idx
       ON vault_records(created_at);
+
+    CREATE TABLE IF NOT EXISTS contacts (
+      device_id          TEXT    PRIMARY KEY,
+      display_name       TEXT    NOT NULL DEFAULT '',
+      phone_number       TEXT,
+      x25519_public_key  BLOB,
+      paired_at          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS contacts_paired_at_idx
+      ON contacts(paired_at);
   ''';
 
   /// Apply the v1 → v2 migration idempotently: add the three new
@@ -126,6 +142,25 @@ class LocalDb {
         'BLOB');
     await _addColumnIfMissing(db, 'vault_records', 'nonce', 'BLOB');
     await _addColumnIfMissing(db, 'vault_records', 'aad', 'BLOB');
+  }
+
+  /// Apply the v2 → v3 migration idempotently: create the `contacts`
+  /// table if it doesn't already exist. SQLite's `CREATE TABLE IF NOT
+  /// EXISTS` makes this a no-op on subsequent runs.
+  static Future<void> _applyV3(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS contacts (
+        device_id          TEXT    PRIMARY KEY,
+        display_name       TEXT    NOT NULL DEFAULT '',
+        phone_number       TEXT,
+        x25519_public_key  BLOB,
+        paired_at          INTEGER NOT NULL
+      );
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS contacts_paired_at_idx
+        ON contacts(paired_at);
+    ''');
   }
 
   static Future<void> _addColumnIfMissing(
@@ -185,11 +220,12 @@ class LocalDb {
   /// and applies upgrade paths).
   static Future<void> migrate(Database db) async {
     // Apply v1 (no-op if already current). Then add v2 columns to
-    // vault_records. A fresh install will go through both, ending up
-    // with the v2 schema. An existing v1 install will gain the new
-    // columns. An existing v2 install will see no-op idempotent ALTERs.
+    // vault_records. Then create the v3 contacts table. A fresh install
+    // goes through all three; an existing install picks up only what's
+    // missing thanks to the idempotent CREATE/ALTER statements.
     await db.execute(_createV1);
     await _applyV2(db);
+    await _applyV3(db);
     await _ensureUserVersion(db, schemaVersion);
   }
 
@@ -225,12 +261,12 @@ class LocalDb {
 
   static Future<void> _onCreate(Database db, int version) async {
     // New databases receive the current schema directly.
-    await db.execute(_createV2);
+    await db.execute(_createV3);
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     // Each branch is a monotonic upgrade. When the next schema bump is
-    // added, add `if (oldVersion < 3) { ... }` etc. — DO NOT edit the
+    // added, add `if (oldVersion < 4) { ... }` etc. — DO NOT edit the
     // v1 path above.
     if (oldVersion < 1) {
       await db.execute(_createV1);
@@ -241,6 +277,10 @@ class LocalDb {
       // only reads rows it created itself, so legacy rows are preserved
       // but ignored.
       await _applyV2(db);
+    }
+    if (oldVersion < 3) {
+      // v2 → v3: paired-contacts table for DIRECT-crypto bootstrap.
+      await _applyV3(db);
     }
   }
 
@@ -401,6 +441,75 @@ class LocalDb {
       'vault_records',
       where: 'id = ?',
       whereArgs: <Object?>[id],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // contacts (v3)
+  // ---------------------------------------------------------------------------
+
+  /// Insert (or upsert) a [ContactRecord]. Stores the X25519 public key as
+  /// a BLOB when present; null otherwise. The `paired_at` column is set to
+  /// `DateTime.now().toUtc().millisecondsSinceEpoch` so callers can list
+  /// contacts by recency.
+  Future<void> insertContact(ContactRecord record) async {
+    await _db.insert(
+      'contacts',
+      <String, Object?>{
+        'device_id': record.deviceId,
+        'display_name': record.displayName,
+        'phone_number': record.phoneNumber,
+        'x25519_public_key': record.x25519PublicKey == null
+            ? null
+            : Uint8List.fromList(record.x25519PublicKey!),
+        'paired_at': DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Look up a single contact by [deviceId]. Returns `null` if no contact
+  /// with that id is paired.
+  Future<ContactRecord?> getContact(String deviceId) async {
+    final rows = await _db.query(
+      'contacts',
+      where: 'device_id = ?',
+      whereArgs: <Object?>[deviceId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return _contactFromRow(rows.first);
+  }
+
+  /// All paired contacts, newest first.
+  Future<List<ContactRecord>> listContacts() async {
+    final rows = await _db.query('contacts', orderBy: 'paired_at DESC');
+    return rows.map(_contactFromRow).toList(growable: false);
+  }
+
+  /// Delete a paired contact by id. Returns rows affected (0 if it was
+  /// already gone).
+  Future<int> deleteContact(String deviceId) async {
+    return _db.delete(
+      'contacts',
+      where: 'device_id = ?',
+      whereArgs: <Object?>[deviceId],
+    );
+  }
+
+  ContactRecord _contactFromRow(Map<String, Object?> row) {
+    final pk = row['x25519_public_key'];
+    Uint8List? x25519;
+    if (pk is Uint8List) {
+      x25519 = pk;
+    } else if (pk is List<int>) {
+      x25519 = Uint8List.fromList(pk);
+    }
+    return ContactRecord(
+      deviceId: row['device_id']! as String,
+      displayName: (row['display_name'] as String?) ?? '',
+      phoneNumber: row['phone_number'] as String?,
+      x25519PublicKey: x25519,
     );
   }
 }
