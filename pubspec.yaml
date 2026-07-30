@@ -37,6 +37,13 @@ dependencies:
   # QR encode (channel invites) — used by #16 (channel QR exchange).
   qr_flutter: ^4.1.0
 
+  # Synchronous SHA-256 for the key-fingerprint string shown under the
+  # channel QR (#16). We pin it explicitly even though it's a transitive
+  # dep of `cryptography` — importing transitive packages directly is
+  # brittle (the host can prune them), and we want this short string
+  # computed sync so the UI can render fingerprint + QR together.
+  crypto: ^3.0.0
+
   # QR decode — used by #16 (channel QR exchange). Note: real device camera
   # required for live use; emulator returns no detections on fake feeds.
   mobile_scanner: ^7.4.0
