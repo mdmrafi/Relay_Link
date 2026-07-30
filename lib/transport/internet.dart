@@ -196,14 +196,11 @@ class InternetTransport implements Transport {
   /// Constructor for production: takes a [RealFirestoreGateway] and the
   /// device's own sender id.
   InternetTransport({
-    required FirestoreGateway gateway,
-    required String ownSenderId,
-    Set<String> channelIds = const <String>{'public'},
-    Duration pollInterval = const Duration(seconds: 30),
-  })  : _gateway = gateway,
-        _ownSenderId = ownSenderId,
-        _channelIds = channelIds,
-        _pollInterval = pollInterval;
+    required this._gateway,
+    required this._ownSenderId,
+    this._channelIds = const <String>{'public'},
+    this._pollInterval = const Duration(seconds: 30),
+  });
 
   /// Whether the device has internet connectivity. The real
   /// implementation should check the platform connectivity plugin; for

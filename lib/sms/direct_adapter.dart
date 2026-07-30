@@ -125,11 +125,9 @@ class DirectSmsAdapter {
   /// code wires the real [SmsPlatformChannel] in #26.
   DirectSmsAdapter({
     required SmsDispatchFn smsChannel,
-    required ContactsLookup contacts,
-    required IsRadioAvailableFn isRadioAvailable,
-  })  : _sendSms = smsChannel,
-        _contacts = contacts,
-        _isRadioAvailable = isRadioAvailable;
+    required this._contacts,
+    required this._isRadioAvailable,
+  }) : _sendSms = smsChannel;
 
   /// Factory wiring the adapter to a real [SmsPlatformChannel]
   /// (Ticket #23) and the unavailability check that consults the

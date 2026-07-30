@@ -122,20 +122,14 @@ class GatewayRelay {
       <({Message message, String reason})>[];
 
   GatewayRelay({
-    required MeshTransport mesh,
-    required InternetTransport internet,
-    required TransportManager transportManager,
-    required SeenCache seenCache,
-    required String Function() ownSenderIdProvider,
-    required Set<String> Function() knownPeersProvider,
-    required bool Function() isGatewayEnabled,
-  })  : _mesh = mesh,
-        _internet = internet,
-        _transportManager = transportManager,
-        _seenCache = seenCache,
-        _ownSenderIdProvider = ownSenderIdProvider,
-        _knownPeersProvider = knownPeersProvider,
-        _isGatewayEnabled = isGatewayEnabled;
+    required this._mesh,
+    required this._internet,
+    required this._transportManager,
+    required this._seenCache,
+    required this._ownSenderIdProvider,
+    required this._knownPeersProvider,
+    required this._isGatewayEnabled,
+  });
 
   /// Whether the orchestrator is currently subscribed to streams.
   bool get isRunning => _running;
