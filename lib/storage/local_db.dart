@@ -170,10 +170,25 @@ class LocalDb {
     String type,
   ) async {
     final rows = await db.rawQuery('PRAGMA table_info($table);');
+    // If the table itself doesn't exist yet, there's nothing to alter —
+    // _applyV3 / _createV1 will create the table with all needed columns.
+    if (rows.isEmpty) return;
     final exists = rows.any((row) => row['name'] == column);
     if (exists) return;
     // SQLite does not allow parameterized ALTER TABLE — interpolate.
     await db.rawQuery('ALTER TABLE $table ADD COLUMN $column $type;');
+  }
+
+  /// Execute a string that may contain multiple semicolon-separated SQL
+  /// statements. sqflite's [Database.execute] only runs the first statement
+  /// in a multi-statement string, so we split and execute each one
+  /// individually. Empty/whitespace-only segments are skipped.
+  static Future<void> _execAll(Database db, String sql) async {
+    for (final stmt in sql.split(';')) {
+      final trimmed = stmt.trim();
+      if (trimmed.isEmpty) continue;
+      await db.execute('$trimmed;');
+    }
   }
 
   final Database _db;
@@ -190,6 +205,13 @@ class LocalDb {
     final existing = _singleton;
     if (existing != null) return existing;
     final db = await _openDefault();
+    // Idempotently ensure every table exists regardless of the stored
+    // user_version. Guards against devices where user_version was stamped
+    // as 3 before the contacts table migration was applied (the CREATE
+    // TABLE IF NOT EXISTS / ALTER TABLE IF NOT EXISTS statements in
+    // migrate() are safe to run multiple times and cost nothing when the
+    // schema is already current).
+    await migrate(db);
     final wrapper = LocalDb._(db);
     _singleton = wrapper;
     return wrapper;
@@ -223,7 +245,11 @@ class LocalDb {
     // vault_records. Then create the v3 contacts table. A fresh install
     // goes through all three; an existing install picks up only what's
     // missing thanks to the idempotent CREATE/ALTER statements.
-    await db.execute(_createV1);
+    //
+    // IMPORTANT: use _execAll, not db.execute, for multi-statement SQL.
+    // sqflite's execute() silently stops after the first statement when
+    // the string contains multiple semicolon-separated statements.
+    await _execAll(db, _createV1);
     await _applyV2(db);
     await _applyV3(db);
     await _ensureUserVersion(db, schemaVersion);
@@ -261,7 +287,9 @@ class LocalDb {
 
   static Future<void> _onCreate(Database db, int version) async {
     // New databases receive the current schema directly.
-    await db.execute(_createV3);
+    // Use _execAll — not db.execute — because _createV3 is a multi-statement
+    // string and sqflite only runs the first statement per execute() call.
+    await _execAll(db, _createV3);
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -269,7 +297,7 @@ class LocalDb {
     // added, add `if (oldVersion < 4) { ... }` etc. — DO NOT edit the
     // v1 path above.
     if (oldVersion < 1) {
-      await db.execute(_createV1);
+      await _execAll(db, _createV1);
     }
     if (oldVersion < 2) {
       // v1 → v2: Ticket #31 vault at-rest encryption envelope. Existing

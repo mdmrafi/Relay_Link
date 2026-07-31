@@ -15,8 +15,9 @@
 // incoming → decrypt → render path end-to-end without hardware.
 
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:relaylink/channels/keys.dart';
@@ -27,6 +28,7 @@ import 'package:relaylink/crypto/identity.dart';
 import 'package:relaylink/mesh/transport.dart';
 import 'package:relaylink/models/message.dart';
 import 'package:relaylink/screens/remote_chat_controller.dart';
+import 'package:relaylink/sms/platform_channel.dart';
 import 'package:relaylink/sms/transport.dart';
 import 'package:relaylink/storage/local_db.dart';
 import 'package:relaylink/transport/internet.dart';
@@ -129,7 +131,27 @@ Future<BootstrapResult> bootstrapServices({LocalDb? dbOverride}) async {
   // 7. TransportManager + transports.
   final transportManager = TransportManager();
   transportManager.register(MeshTransport());
-  transportManager.register(SmsTransport());
+
+  // Wire SmsTransport with real contacts, seen-cache, and manager so
+  // phone-number lookups, dedup, and rebroadcast all work.
+  final smsTransport = SmsTransport(
+    contacts: _ContactsStoreAdapter(contactsLookup),
+    seenCache: _LocalDbSeenCache(db),
+    manager: _TransportManagerAdapter(transportManager),
+  );
+  transportManager.register(smsTransport);
+  // Start listening for incoming SMS on Android. On iOS this is a no-op
+  // (SmsPlatformChannel.isAvailable returns false there).
+  if (!kIsWeb && Platform.isAndroid) {
+    smsTransport.start();
+    // Request SMS permissions on first run (best-effort; user can deny).
+    unawaited(
+      SmsPlatformChannel().requestSmsPermissions().catchError(
+        (_) => <String, bool>{},
+      ),
+    );
+  }
+
   // `InternetTransport` requires a `FirestoreGateway`; the null-object
   // gateway returns "unavailable" so the transport registers but never
   // observes traffic. This is the honest "registered but stubbed"
@@ -274,4 +296,45 @@ class _UnavailableFirestoreGateway implements FirestoreGateway {
   ) async {
     throw const FirestoreGatewayUnavailable();
   }
+}
+
+// ---------------------------------------------------------------------------
+// SMS host-interface adapters
+// ---------------------------------------------------------------------------
+
+/// Bridges [RepositoryContactsLookup] into the [ContactsStore] interface
+/// that [SmsTransport] uses to resolve device-id → phone number.
+class _ContactsStoreAdapter implements ContactsStore {
+  _ContactsStoreAdapter(this._lookup);
+  final RepositoryContactsLookup _lookup;
+
+  @override
+  String? phoneFor(String deviceId) {
+    final record = _lookup.lookupByDeviceId(deviceId);
+    return record?.phoneNumber;
+  }
+}
+
+/// Bridges [LocalDb]'s seen-cache methods into the [SeenCache] interface
+/// that [SmsTransport] uses for duplicate-message filtering.
+class _LocalDbSeenCache implements SeenCache {
+  _LocalDbSeenCache(this._db);
+  final LocalDb _db;
+
+  @override
+  Future<void> markSeen(String id) => _db.markSeen(id);
+
+  @override
+  Future<bool> isSeen(String id) => _db.isSeen(id);
+}
+
+/// Bridges [TransportManager] into the [TransportManagerHost] interface
+/// that [SmsTransport] uses to rebroadcast reassembled messages onto the
+/// other transports.
+class _TransportManagerAdapter implements TransportManagerHost {
+  _TransportManagerAdapter(this._manager);
+  final TransportManager _manager;
+
+  @override
+  Future<void> rebroadcast(Message msg) => _manager.fanOutSend(msg);
 }

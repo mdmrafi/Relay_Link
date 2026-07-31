@@ -26,7 +26,9 @@ import 'package:relaylink/contacts/contact.dart';
 import 'package:relaylink/contacts/contacts_lookup.dart';
 import 'package:relaylink/contacts/repository_contacts_lookup.dart';
 import 'package:relaylink/crypto/contact_invite.dart';
+import 'package:relaylink/crypto/identity.dart';
 import 'package:relaylink/screens/capability_disclosure.dart';
+import 'package:relaylink/screens/chat.dart';
 import 'package:relaylink/screens/contacts.dart';
 import 'package:relaylink/screens/home.dart';
 import 'package:relaylink/screens/remote_chat_controller.dart';
@@ -203,11 +205,23 @@ class RelayLinkHome extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final bootstrap = ref.watch(bootstrapResultProvider);
+    final identity = ref.watch(deviceIdentityProvider);
     return HomeScreen(
       onContactsTapped: () {
         Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => const _ProductionContactsScreen(),
+          ),
+        );
+      },
+      onComposeTapped: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => _ProductionChatScreen(
+              bootstrap: bootstrap,
+              identity: identity,
+            ),
           ),
         );
       },
@@ -334,5 +348,30 @@ class _ProductionContactsRepository implements ContactsRepository {
   Future<bool> remove(String id) async {
     final n = await contactsLookup.delete(id);
     return n > 0;
+  }
+}
+
+/// Production broadcast chat screen. Wires the shared [RemoteChatController]
+/// and local [DeviceIdentity] into the [ChatScreen] widget so messages are
+/// encrypted, fanned-out over all registered transports, and stored in the
+/// local DB.
+class _ProductionChatScreen extends StatelessWidget {
+  const _ProductionChatScreen({
+    required this.bootstrap,
+    required this.identity,
+  });
+
+  final BootstrapResult bootstrap;
+  final DeviceIdentity identity;
+
+  @override
+  Widget build(BuildContext context) {
+    return ChatScreen(
+      controller: bootstrap.remoteChatController,
+      senderId: identity.senderId,
+      senderDisplayName: 'Me',
+      channelId: 'public',
+      channelName: 'Public channel',
+    );
   }
 }
